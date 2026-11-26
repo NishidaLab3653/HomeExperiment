@@ -3,13 +3,15 @@ using System.Collections.Generic;
 using UnityEngine;
 
 // シーンマネージャー(Assets/0Scenes/HomeSceneManager.unity)の画面。再生すると、画面の案内に沿って
-//   1. このPCの設定(役割・データの場所)
-//   2. 実験(既存の実験を選ぶ / 新しく作る。既存の実験から部屋・位置・点群を引き継げる)
-//   3. キネクト(このPCにつないでいるキネクトを調べて選ぶ)
-//   4. キャリブレーション(基準の点群を選んで、位置合わせのシーンへ)
-//   5. 記録(実験対象者を決めて、記録のシーンへ)
-//   6. 分析(分析のシーンを開く)
-//   7. 同期の状態
+//   - このPCの設定(役割・データの場所。制御PCはキネクトをつながないこともできる)
+//   - 実験(既存の実験を選ぶ / 新しく作る。既存の実験から部屋・位置・点群を引き継げる)
+//   - キネクト(このPCにつないでいるキネクトを調べて選ぶ。キネクトを使うPCだけ)
+//   - キャリブレーション(基準の点群を選んで、位置合わせのシーンへ。キネクトを使うPCだけ)
+//   - 部屋と物体の配置(保存済みの点群に合わせて部屋と物体を置く。制御PC・このPCだけ)
+//   - 記録(実験対象者を決めて、記録のシーンへ)
+//   - 分析(分析のシーンを開く)
+//   - 同期の状態
+// メニューのカードの番号は、このPCで表示している順に振る。
 // を進められる。設定は PC ごとのファイル(UserSettings/)に保存し、計測のシーンはインスペクターの代わりにこの値を使う。
 // メニューの HomeExperiment > シーンマネージャーで始める(Ctrl+Shift+H)で、このシーンを開いて再生できる。
 public class HomeSceneManagerUI : MonoBehaviour
@@ -21,6 +23,7 @@ public class HomeSceneManagerUI : MonoBehaviour
         Experiment,
         Kinects,
         Calibration,
+        Room,
         Recording,
         Analysis,
         Sync
@@ -138,6 +141,7 @@ public class HomeSceneManagerUI : MonoBehaviour
             case Page.Experiment: DrawExperiment(); break;
             case Page.Kinects: DrawKinects(); break;
             case Page.Calibration: DrawCalibration(); break;
+            case Page.Room: DrawRoom(); break;
             case Page.Recording: DrawRecording(); break;
             case Page.Analysis: DrawAnalysis(); break;
             case Page.Sync: DrawSync(); break;
@@ -233,11 +237,20 @@ public class HomeSceneManagerUI : MonoBehaviour
         GUILayout.Label($"次にやること: <b>{nextText}</b>", textStyle);
         GUILayout.Space(8);
 
-        Card(Page.Pc, "1. このPCの設定", PcSummary(settings), next);
-        Card(Page.Experiment, "2. 実験", ExperimentSummaryText(), next);
-        Card(Page.Kinects, "3. キネクト", KinectSummary(settings), next);
-        Card(Page.Calibration, "4. キャリブレーション", CalibrationSummary(settings), next);
-        Card(Page.Recording, "5. 記録", RecordingSummary(), next);
+        int number = 1;
+        Card(Page.Pc, $"{number++}. このPCの設定", PcSummary(settings), next);
+        Card(Page.Experiment, $"{number++}. 実験", ExperimentSummaryText(), next);
+
+        if (settings.HasKinectsHere)
+        {
+            Card(Page.Kinects, $"{number++}. キネクト", KinectSummary(settings), next);
+            Card(Page.Calibration, $"{number++}. キャリブレーション", CalibrationSummary(settings), next);
+        }
+
+        if (settings.CanEditRoom)
+            Card(Page.Room, $"{number++}. 部屋と物体の配置", RoomSummary(), next);
+
+        Card(Page.Recording, $"{number++}. {(settings.HasKinectsHere ? "記録" : "実験対象者")}", RecordingSummary(), next);
         Card(Page.Analysis, "分析", "記録したデータを再生・解析するシーンを開く", next);
 
         if (settings.UsesNetwork)
@@ -278,18 +291,45 @@ public class HomeSceneManagerUI : MonoBehaviour
             return settings.CanEditSession ? Page.Experiment : (settings.UsesNetwork ? Page.Sync : Page.Experiment);
         }
 
-        if (UsedKinects(settings).Count == 0)
+        if (settings.HasKinectsHere)
         {
-            text = "このPCで使うキネクトを選ぶ";
-            return Page.Kinects;
+            if (UsedKinects(settings).Count == 0)
+            {
+                text = "このPCで使うキネクトを選ぶ";
+                return Page.Kinects;
+            }
+
+            List<string> missing = MissingPoses(settings);
+
+            if (missing.Count > 0)
+            {
+                text = $"キャリブレーション(Kinect {string.Join(", ", missing)} の位置合わせがまだ)";
+                return Page.Calibration;
+            }
         }
 
-        List<string> missing = MissingPoses(settings);
-
-        if (missing.Count > 0)
+        if (settings.CanEditRoom && (CurrentExperiment == null || CurrentExperiment.roomObjectCount == 0))
         {
-            text = $"キャリブレーション(Kinect {string.Join(", ", missing)} の位置合わせがまだ)";
-            return Page.Calibration;
+            if (!HasReferencePointCloud(settings) && settings.UsesNetwork)
+            {
+                text = $"録画PCで基準の Kinect {settings.referenceKinectId} の位置合わせが終わるのを待つ(終わると点群が届きます)";
+                return Page.Sync;
+            }
+
+            text = "部屋と物体を点群に合わせて置く";
+            return Page.Room;
+        }
+
+        if (!settings.HasKinectsHere)
+        {
+            if (!HomeExperimentPaths.IsValidFolderName(session.subjectName, out _))
+            {
+                text = "実験対象者を決めて全PCに配る";
+                return Page.Recording;
+            }
+
+            text = "録画PCで記録する(このPCでは記録しません)";
+            return Page.Sync;
         }
 
         text = HomeExperimentPaths.IsValidFolderName(session.subjectName, out _)
@@ -315,6 +355,23 @@ public class HomeSceneManagerUI : MonoBehaviour
         }
 
         return missing;
+    }
+
+    // 基準のキネクトの点群がこの実験に保存済みか(部屋と物体を合わせる目安になる)
+    private bool HasReferencePointCloud(HomeSyncSettings settings)
+    {
+        HomeExperimentCatalog.KinectEnv reference = CurrentExperiment?.Kinect(settings.referenceKinectId);
+        return reference != null && reference.hasPointCloud;
+    }
+
+    private string RoomSummary()
+    {
+        HomeExperimentCatalog.ExperimentSummary experiment = CurrentExperiment;
+
+        if (experiment == null || experiment.roomObjectCount == 0)
+            return "部屋と物体はまだ置いていません";
+
+        return $"部屋 {experiment.roomObjectCount}個 / 対象物体 {experiment.targetGroupCount}個(保存 {experiment.roomSavedAt})";
     }
 
     private static string PcSummary(HomeSyncSettings settings) =>
@@ -371,7 +428,7 @@ public class HomeSceneManagerUI : MonoBehaviour
     private void DrawPc()
     {
         HomeSyncSettings settings = HomeSyncSettings.Current;
-        Heading("1. このPCの設定", "このPCの役割を選んでください。全PCで実験の名前や部屋をそろえるときは、1台を「制御PC」、残りを「録画PC」にします。");
+        Heading("このPCの設定", "このPCの役割を選んでください。全PCで実験の名前や部屋をそろえるときは、1台を「制御PC」、残りを「録画PC」にします。");
 
         HomeSyncRole[] roles = { HomeSyncRole.Control, HomeSyncRole.Recorder, HomeSyncRole.Single };
         string[] titles = { "制御PC", "録画PC", "このPCだけ" };
@@ -411,6 +468,22 @@ public class HomeSceneManagerUI : MonoBehaviour
             SaveSettings(edited);
             Notify("この画面の設定を使わないようにしました。計測のシーンはインスペクターの設定を使います。");
             return;
+        }
+
+        if (settings.role == HomeSyncRole.Control)
+        {
+            GUILayout.Space(8);
+            bool noKinects = GUILayout.Toggle(settings.noKinectsHere,
+                " このPCにはキネクトをつながない(実験・部屋・実験対象者を決めるだけで、記録は録画PCで行う)", toggleStyle);
+
+            if (noKinects != settings.noKinectsHere)
+            {
+                HomeSyncSettings edited = settings.Clone();
+                edited.noKinectsHere = noKinects;
+                SaveSettings(edited);
+                settings = edited;
+                Notify(noKinects ? "このPCではキネクトを使わないようにしました。" : "このPCでもキネクトを使うようにしました。");
+            }
         }
 
         GUILayout.Space(12);
@@ -469,6 +542,14 @@ public class HomeSceneManagerUI : MonoBehaviour
         NextButton(Page.Experiment, "次へ: 実験");
     }
 
+    private void NextAfterExperiment(HomeSyncSettings settings)
+    {
+        if (settings.HasKinectsHere)
+            NextButton(Page.Kinects, "次へ: キネクト");
+        else if (settings.CanEditRoom)
+            NextButton(Page.Room, "次へ: 部屋と物体の配置");
+    }
+
     private void NextButton(Page target, string label)
     {
         GUILayout.Space(16);
@@ -488,17 +569,17 @@ public class HomeSceneManagerUI : MonoBehaviour
 
         if (!settings.CanEditSession)
         {
-            Heading("2. 実験", "録画PCでは、実験は制御PCで選びます。制御PCで選ばれると、ここに表示され、部屋などのデータも届きます。");
+            Heading("実験", "録画PCでは、実験は制御PCで選びます。制御PCで選ばれると、ここに表示され、部屋などのデータも届きます。");
             GUILayout.Label($"制御PCが選んだ実験: <b>{Show(session.experimentName)}</b>", textStyle);
 
             if (CurrentExperiment != null)
                 GUILayout.Label($"このPCに届いているデータ: {CurrentExperiment.Describe()}", textStyle);
 
-            NextButton(Page.Kinects, "次へ: キネクト");
+            NextAfterExperiment(HomeSyncSettings.Current);
             return;
         }
 
-        Heading("2. 実験", "続きの実験なら一覧から選び、初めての実験なら「新しく作る」を選んでください。" +
+        Heading("実験", "続きの実験なら一覧から選び、初めての実験なら「新しく作る」を選んでください。" +
                           (settings.role == HomeSyncRole.Control ? "選んだ実験は全PCに配られます。" : ""));
         experimentTab = GUILayout.Toolbar(experimentTab, new[] { "既存の実験を選ぶ", "新しく作る" }, buttonStyle);
         GUILayout.Space(8);
@@ -528,7 +609,7 @@ public class HomeSceneManagerUI : MonoBehaviour
         }
 
         if (HomeExperimentPaths.IsValidFolderName(session.experimentName, out _))
-            NextButton(Page.Kinects, "次へ: キネクト");
+            NextAfterExperiment(HomeSyncSettings.Current);
     }
 
     private void SelectExperiment(HomeSyncSettings settings, string experimentName)
@@ -601,7 +682,13 @@ public class HomeSceneManagerUI : MonoBehaviour
     private void DrawKinects()
     {
         HomeSyncSettings settings = HomeSyncSettings.Current;
-        Heading("3. キネクト", "このPCにUSBでつないでいるキネクトを選びます。まず「つながっているキネクトを調べる」を押してください。" +
+
+        if (!settings.HasKinectsHere)
+        {
+            DrawNoKinectsHere();
+            return;
+        }
+        Heading("キネクト", "このPCにUSBでつないでいるキネクトを選びます。まず「つながっているキネクトを調べる」を押してください。" +
                             "同期ケーブルを使うときは、全PCの中で1台だけ Master、他は Subordinate にします。");
 
         if (GUILayout.Button("つながっているキネクトを調べる", bigButton))
@@ -692,7 +779,7 @@ public class HomeSceneManagerUI : MonoBehaviour
         HomeExperimentCatalog.KinectEnv env = experiment?.Kinect(entry.kinectId);
 
         if (env == null || !env.hasPose)
-            return "この実験ではまだ位置合わせしていません(4. キャリブレーションで行います)。";
+            return "この実験ではまだ位置合わせしていません(キャリブレーションで行います)。";
 
         string saved = env.serialNumber;
         string selected = settings.detectedSerials != null && entry.deviceIndex < settings.detectedSerials.Length
@@ -740,8 +827,14 @@ public class HomeSceneManagerUI : MonoBehaviour
     private void DrawCalibration()
     {
         HomeSyncSettings settings = HomeSyncSettings.Current;
+
+        if (!settings.HasKinectsHere)
+        {
+            DrawNoKinectsHere();
+            return;
+        }
         HomeExperimentCatalog.ExperimentSummary experiment = CurrentExperiment;
-        Heading("4. キャリブレーション", "部屋の中でのキネクトの位置を求めます。基準にするキネクトの点群に、他のキネクトの点群を合わせます。" +
+        Heading("キャリブレーション", "部屋の中でのキネクトの位置を求めます。基準にするキネクトの点群に、他のキネクトの点群を合わせます。" +
                                        "基準と点群の取り方を選んで「キャリブレーションを始める」を押してください。");
 
         if (!HomeExperimentPaths.IsValidFolderName(HomeSession.Current.experimentName, out _))
@@ -793,12 +886,86 @@ public class HomeSceneManagerUI : MonoBehaviour
         }
 
         if (UsedKinects(settings).Count == 0)
-            GUILayout.Label("<color=#ff8080>このPCで使うキネクトが選ばれていません(3. キネクト)。</color>", textStyle);
+            GUILayout.Label("<color=#ff8080>このPCで使うキネクトが選ばれていません(キネクト)。</color>", textStyle);
 
         GUILayout.Space(12);
 
         if (GUILayout.Button("キャリブレーションを始める", bigButton))
             HomeSceneFlow.Load(HomeSceneFlow.Setup);
+
+        GUILayout.Label("ここでは部屋と物体は保存しません(前の配置を上書きしないため)。部屋と物体は「部屋と物体の配置」で保存します。", smallStyle);
+
+        if (settings.CanEditRoom)
+            NextButton(Page.Room, "次へ: 部屋と物体の配置");
+        else
+            NextButton(Page.Recording, "次へ: 記録");
+    }
+
+    // ------------------------------------------------------------
+    // 部屋と物体の配置
+    // ------------------------------------------------------------
+
+    private void DrawRoom()
+    {
+        HomeSyncSettings settings = HomeSyncSettings.Current;
+        HomeExperimentCatalog.ExperimentSummary experiment = CurrentExperiment;
+        Heading("部屋と物体の配置", "位置合わせしたキネクトの点群を表示して、部屋のモデルと物体をそれに重ねて置きます。" +
+                                   (settings.role == HomeSyncRole.Control ? "保存すると全PCに配られます。" : ""));
+
+        if (!HomeExperimentPaths.IsValidFolderName(HomeSession.Current.experimentName, out _))
+        {
+            GUILayout.Label("先に実験を選んでください。", textStyle);
+            NextButton(Page.Experiment, "実験を選ぶ");
+            return;
+        }
+
+        if (!settings.CanEditRoom)
+        {
+            GUILayout.Label("部屋と物体は制御PCで置きます。このPCには制御PCで保存したものが届きます。", textStyle);
+            return;
+        }
+
+        GUILayout.Label("表示する点群", textStyle);
+        bool anyCloud = false;
+
+        foreach (HomeKinectDeviceIndex entry in settings.kinects)
+        {
+            HomeExperimentCatalog.KinectEnv env = experiment?.Kinect(entry.kinectId);
+
+            if (env == null || !env.hasPointCloud)
+                continue;
+
+            anyCloud = true;
+            string reference = entry.kinectId == settings.referenceKinectId ? "(基準)" : "";
+            GUILayout.Label($"Kinect {entry.kinectId}{reference}: 点群 ✓({env.pointCloudSavedAt:MM/dd HH:mm})", smallStyle);
+        }
+
+        if (!anyCloud)
+            GUILayout.Label($"<color=#ffb060>まだ点群がありません。先に基準の Kinect {settings.referenceKinectId} の位置合わせをすると、ここに出ます。" +
+                            "点群がなくても置けますが、部屋の中の位置は目分量になります。</color>", textStyle);
+        else if (!HasReferencePointCloud(settings))
+            GUILayout.Label($"<color=#ffb060>基準の Kinect {settings.referenceKinectId} の点群がまだありません。</color>", textStyle);
+
+        GUILayout.Space(8);
+        GUILayout.Label("保存済みの配置", textStyle);
+        GUILayout.Label(RoomSummary(), smallStyle);
+
+        if (experiment != null && experiment.roomObjectCount > 0)
+            GUILayout.Label("<color=#ffb060>配置のシーンは、前に保存した配置を読み込まず、シーンファイルに置いてある配置から始まります。" +
+                            "Space で保存すると、そのときの配置で上書きします。</color>", smallStyle);
+
+        GUILayout.Space(8);
+        GUILayout.Label("手順", textStyle);
+
+        foreach (string step in HomeSceneFlow.RoomPlacement.steps)
+            GUILayout.Label($"・{step}", smallStyle);
+
+        GUILayout.Space(12);
+
+        if (GUILayout.Button("配置を始める", bigButton))
+            HomeSceneFlow.Load(HomeSceneFlow.RoomPlacement);
+
+        NextButton(Page.Recording, settings.HasKinectsHere ? "次へ: 記録" : "次へ: 実験対象者");
     }
 
     // ------------------------------------------------------------
@@ -809,7 +976,7 @@ public class HomeSceneManagerUI : MonoBehaviour
     {
         HomeSyncSettings settings = HomeSyncSettings.Current;
         HomeSessionData session = HomeSession.Current;
-        Heading("5. 記録", "実験対象者を決めて、記録のシーンを選んでください。記録のシーンでは Space キーで開始・終了します。");
+        Heading("記録", "実験対象者を決めて、記録のシーンを選んでください。記録のシーンでは Space キーで開始・終了します。");
 
         if (!HomeExperimentPaths.IsValidFolderName(session.experimentName, out _))
         {
@@ -857,6 +1024,13 @@ public class HomeSceneManagerUI : MonoBehaviour
             GUILayout.Label($"制御PCが決めた実験対象者: <b>{Show(session.subjectName)}</b>", textStyle);
         }
 
+        if (!settings.HasKinectsHere)
+        {
+            GUILayout.Space(12);
+            GUILayout.Label("このPCにはキネクトをつながないので、記録は録画PCで行います。実験対象者を決めると全PCに配られます。", textStyle);
+            return;
+        }
+
         GUILayout.Space(12);
         GUILayout.Label("記録の前の確認", textStyle);
         List<string> problems = RecordingProblems(settings);
@@ -885,12 +1059,12 @@ public class HomeSceneManagerUI : MonoBehaviour
             problems.Add("実験対象者が決まっていません。");
 
         if (UsedKinects(settings).Count == 0)
-            problems.Add("このPCで使うキネクトが選ばれていません(3. キネクト)。");
+            problems.Add("このPCで使うキネクトが選ばれていません(キネクト)。");
 
         List<string> missing = MissingPoses(settings);
 
         if (missing.Count > 0)
-            problems.Add($"Kinect {string.Join(", ", missing)} の位置合わせがまだです(4. キャリブレーション)。");
+            problems.Add($"Kinect {string.Join(", ", missing)} の位置合わせがまだです(キャリブレーション)。");
 
         if (settings.role == HomeSyncRole.Recorder && !HomeSyncStatus.Connected)
             problems.Add("制御PCにつながっていません(実験・実験対象者が最新でない可能性があります)。");
@@ -901,6 +1075,12 @@ public class HomeSceneManagerUI : MonoBehaviour
             problems.Add(tableProblem);
 
         return problems;
+    }
+
+    private void DrawNoKinectsHere()
+    {
+        Heading("キネクト", "このPCは「キネクトをつながない制御PC」なので、キネクトとキャリブレーションは録画PCで行います。");
+        NextButton(Page.Pc, "このPCの設定を変える");
     }
 
     // ------------------------------------------------------------

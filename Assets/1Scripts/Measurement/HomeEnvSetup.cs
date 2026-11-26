@@ -124,7 +124,10 @@ public class HomeEnvSetup : MonoBehaviour, IHomeExperimentNameProvider, IHomeDat
 
     private void PrepareSavedReferencePointCloud()
     {
-        if (ReferenceSource != ReferencePointCloudSource.SavedEnvIfExists ||
+        // 「部屋と物体の配置」では、録画PCで位置合わせした保存済みの点群を必ず使う
+        bool useSaved = ReferenceSource == ReferencePointCloudSource.SavedEnvIfExists || HomeSceneFlow.IsRoomPlacement;
+
+        if (!useSaved ||
             !HomeExperimentPaths.IsValidRootDirectory(DataRootDirectory, out _) ||
             !HomeExperimentPaths.IsValidFolderName(ExperimentName, out _))
             return;
@@ -138,7 +141,9 @@ public class HomeEnvSetup : MonoBehaviour, IHomeExperimentNameProvider, IHomeDat
 
         if (!File.Exists(path))
         {
-            Debug.Log($"[HomeEnvSetup] Kinect{reference.KinectId} の保存済み点群が無いため、ライブで撮ります: {path}");
+            Debug.Log(reference.gameObject.activeInHierarchy
+                ? $"[HomeEnvSetup] Kinect{reference.KinectId} の保存済み点群が無いため、ライブで撮ります: {path}"
+                : $"[HomeEnvSetup] 基準の Kinect{reference.KinectId} の保存済み点群がまだありません(このPCにはつないでいません): {path}");
             return;
         }
 
@@ -155,6 +160,26 @@ public class HomeEnvSetup : MonoBehaviour, IHomeExperimentNameProvider, IHomeDat
 
         if (savedReferenceKinect != null)
             ShowSavedReferencePointCloud(savedReferenceKinect);
+
+        if (HomeSceneFlow.IsRoomPlacement)
+            ShowOtherSavedPointClouds();
+    }
+
+    // 「部屋と物体の配置」では、このPCにつないでいないキネクトの保存済みの点群も表示する(部屋のモデルを合わせる目安)
+    private void ShowOtherSavedPointClouds()
+    {
+        if (!HomeExperimentPaths.IsValidRootDirectory(DataRootDirectory, out _) ||
+            !HomeExperimentPaths.IsValidFolderName(ExperimentName, out _))
+            return;
+
+        foreach (HomeKinect kinect in GetKinects(true))
+        {
+            if (kinect == savedReferenceKinect || kinect.gameObject.activeInHierarchy)
+                continue;
+
+            if (File.Exists(HomeExperimentPaths.GetKinectPointCloudPath(DataRootDirectory, ExperimentName, kinect.KinectId)))
+                CreateSavedPointCloud(kinect);
+        }
     }
 
     private void LoadInitialKinectPoses()
@@ -185,10 +210,32 @@ public class HomeEnvSetup : MonoBehaviour, IHomeExperimentNameProvider, IHomeDat
     // 基準キネクト本体が非表示(このマシンにつないでいない)でも表示できるよう、キネクトの子ではなく別のオブジェクトにする。
     private void ShowSavedReferencePointCloud(HomeKinect reference)
     {
+        Transform cloud = CreateSavedPointCloud(reference);
+
+        if (cloud == null)
+            return;
+
+        int icpCount = 0;
+
+        foreach (ICP icp in FindObjectsOfType<ICP>(true))
+        {
+            if (icp.ReferenceRoot != null && icp.ReferenceRoot.IsChildOf(reference.transform))
+            {
+                icp.ReferenceRoot = cloud;
+                icpCount++;
+            }
+        }
+
+        Debug.Log($"[HomeEnvSetup] Kinect{reference.KinectId} の保存済み点群を ICP {icpCount} 個の基準にしました。");
+    }
+
+    // 保存済みの点群を、一緒に保存した位置姿勢に置いて表示する(読めなければ null)
+    private Transform CreateSavedPointCloud(HomeKinect reference)
+    {
         string path = HomeExperimentPaths.GetKinectPointCloudPath(DataRootDirectory, ExperimentName, reference.KinectId);
 
         if (!HomePointCloudIO.TryLoad(path, out List<Vector3> points))
-            return;
+            return null;
 
         // 点群はキネクトのローカル座標なので、一緒に保存した位置姿勢に合わせる
         if (!reference.TryLoadPose(HomeExperimentPaths.GetKinectTransformPath(DataRootDirectory, ExperimentName, reference.KinectId)))
@@ -208,18 +255,8 @@ public class HomeEnvSetup : MonoBehaviour, IHomeExperimentNameProvider, IHomeDat
         if (liveRenderer != null)
             renderer.sharedMaterials = liveRenderer.sharedMaterials;
 
-        int icpCount = 0;
-
-        foreach (ICP icp in FindObjectsOfType<ICP>(true))
-        {
-            if (icp.ReferenceRoot != null && icp.ReferenceRoot.IsChildOf(reference.transform))
-            {
-                icp.ReferenceRoot = cloud.transform;
-                icpCount++;
-            }
-        }
-
-        Debug.Log($"[HomeEnvSetup] Kinect{reference.KinectId} の保存済み点群 {points.Count} 点を表示し、ICP {icpCount} 個の基準にしました: {path}");
+        Debug.Log($"[HomeEnvSetup] Kinect{reference.KinectId} の保存済み点群 {points.Count} 点を表示しました: {path}");
+        return cloud.transform;
     }
 
     private HomeKinect FindReferenceKinect()
@@ -273,8 +310,12 @@ public class HomeEnvSetup : MonoBehaviour, IHomeExperimentNameProvider, IHomeDat
 
         int kinectCount = 0;
         int pointCloudCount = 0;
+        bool roomPlacement = HomeSceneFlow.IsRoomPlacement;
 
-        foreach (HomeKinect kinect in GetKinects(false))
+        if (roomPlacement)
+            Debug.Log("[HomeEnvSetup] 「部屋と物体の配置」なので、キネクトの位置姿勢・点群は保存しません。");
+
+        foreach (HomeKinect kinect in roomPlacement ? new HomeKinect[0] : GetKinects(false))
         {
             // 保存済みの点群を基準に使っている場合、基準キネクトはこのプレイで撮っていないので上書きしない
             if (kinect == savedReferenceKinect)
@@ -313,8 +354,13 @@ public class HomeEnvSetup : MonoBehaviour, IHomeExperimentNameProvider, IHomeDat
         // 同期を使っているとき、部屋オブジェクト・対象物体は制御PCだけが保存する(録画PCが古い部屋で上書きして全PCに配らないように)
         bool isSyncRecorder = HomeSharedSession.IsActive(useSharedSession) && HomeSyncSettings.Current.role == HomeSyncRole.Recorder;
 
+        // シーンマネージャーから「キャリブレーション」として開いたときは、部屋は「部屋と物体の配置」で保存する(前の配置を上書きしないため)
+        bool calibrationOnly = HomeSharedSession.IsActive(useSharedSession) && HomeSceneFlow.IsCalibration;
+
         if (isSyncRecorder)
             Debug.Log("[HomeEnvSetup] このPCは同期の録画PCなので、部屋オブジェクト・対象物体は保存しません(制御PCで保存したものを受け取ります)。");
+        else if (calibrationOnly)
+            Debug.Log("[HomeEnvSetup] キャリブレーションでは部屋オブジェクト・対象物体を保存しません(シーンマネージャーの「部屋と物体の配置」で保存します)。");
         else if (!saveRoomObjects)
             Debug.Log("[HomeEnvSetup] Save Room Objects がオフのため、部屋オブジェクト・対象物体は保存しません(Envの既存ファイルはそのまま)。");
         else if (roots.Count == 0)

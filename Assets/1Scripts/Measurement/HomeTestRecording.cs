@@ -80,6 +80,10 @@ public class HomeTestRecording : MonoBehaviour
 
     private void Update()
     {
+        // 「部屋と物体の配置」として開いているときは試し撮りしない(Space は部屋の保存し直しに使う)
+        if (HomeSceneFlow.IsRoomPlacement)
+            return;
+
         bool ready = allowBeforeSave || envSetup == null || envSetup.HasSaved;
 
         // 保存後は同じキーを試し撮りに使う(保存のキー入力と同じフレームでは始めない)

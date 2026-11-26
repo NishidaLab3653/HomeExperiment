@@ -58,6 +58,9 @@ public class HomeSyncSettings
     public string referenceKinectId = "A";
     public HomeEnvSetup.ReferencePointCloudSource referencePointCloudSource = HomeEnvSetup.ReferencePointCloudSource.SavedEnvIfExists;
 
+    // 制御PCにキネクトをつながない(実験・部屋の管理だけをする)。オンのとき、計測のシーンではこのPCのキネクトを全部使わない
+    public bool noKinectsHere;
+
     public string DisplayName => string.IsNullOrWhiteSpace(pcName) ? Environment.MachineName : pcName.Trim();
 
     // ネットワークを使う役割か
@@ -65,6 +68,12 @@ public class HomeSyncSettings
 
     // 実験の名前・実験対象者をこのPCで決められるか(録画PCは制御PCから受け取るだけ)
     public bool CanEditSession => role == HomeSyncRole.Control || role == HomeSyncRole.Single;
+
+    // このPCでキネクトを使うか(キネクトをつながない制御PCだけ false)
+    public bool HasKinectsHere => !(role == HomeSyncRole.Control && noKinectsHere);
+
+    // 部屋と物体の配置をこのPCで行うか(録画PCは制御PCから受け取るだけ)
+    public bool CanEditRoom => role == HomeSyncRole.Control || role == HomeSyncRole.Single;
 
     public HomeSyncSettings Clone() => JsonUtility.FromJson<HomeSyncSettings>(JsonUtility.ToJson(this));
 
@@ -171,10 +180,27 @@ public static class HomeSharedSession
     public static string DataRootDirectory(bool useSharedSession, string inspectorValue) =>
         IsActive(useSharedSession) ? HomeSyncSettings.Current.dataRootDirectory : inspectorValue;
 
-    public static HomeKinectDeviceIndex[] KinectTable(bool useSharedSession, HomeKinectDeviceIndex[] inspectorValue) =>
-        IsActive(useSharedSession) && HomeSyncSettings.Current.kinects != null && HomeSyncSettings.Current.kinects.Length > 0
-            ? HomeSyncSettings.Current.kinects
-            : inspectorValue;
+    public static HomeKinectDeviceIndex[] KinectTable(bool useSharedSession, HomeKinectDeviceIndex[] inspectorValue)
+    {
+        HomeSyncSettings settings = HomeSyncSettings.Current;
+
+        if (!IsActive(useSharedSession) || settings.kinects == null || settings.kinects.Length == 0)
+            return inspectorValue;
+
+        if (settings.HasKinectsHere)
+            return settings.kinects;
+
+        // キネクトをつながない制御PC: 表は残したまま、全部「使わない」にして返す(設定ファイルの表は書き換えない)
+        HomeKinectDeviceIndex[] none = new HomeKinectDeviceIndex[settings.kinects.Length];
+
+        for (int i = 0; i < none.Length; i++)
+        {
+            HomeKinectDeviceIndex source = settings.kinects[i];
+            none[i] = new HomeKinectDeviceIndex(source.kinectId, source.deviceIndex) { use = false, syncMode = source.syncMode };
+        }
+
+        return none;
+    }
 }
 
 public static class HomeSyncPaths

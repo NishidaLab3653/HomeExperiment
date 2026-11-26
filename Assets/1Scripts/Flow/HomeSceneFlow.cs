@@ -32,8 +32,16 @@ public static class HomeSceneFlow
     public static readonly SceneInfo Setup = new SceneInfo(SetupScene, "キャリブレーション(部屋とキネクトの位置合わせ)",
         "各キネクトの点群が表示されるまで待つ(基準キネクトは保存済みの点群を使うこともある)",
         "点群が部屋に重なるよう、画面のボタンで位置合わせ(ICP)する",
-        "合ったら Space キーで保存する(キネクトの位置・点群。制御PCなら部屋も)",
+        "合ったら Space キーで保存する(このPCのキネクトの位置・点群。部屋と物体は保存しない)",
         "続けて Space キーで試し撮り → もう一度 Space で終了し、フレームの抜けを確かめる(任意)",
+        "終わったら「メニューに戻る」");
+
+    // 同じシーン0を「部屋と物体の配置」に使う。このときはキネクトの位置を保存せず、部屋と物体だけを保存する
+    public static readonly SceneInfo RoomPlacement = new SceneInfo(SetupScene, "部屋と物体の配置",
+        "保存済みのキネクトの点群が表示されるまで待つ(録画PCで位置合わせしたもの)",
+        "部屋のモデルと物体を、点群に重なるよう動かす(RoomObjects の下。物体は部屋のモデルの下に置く)",
+        "合ったら Space キーで保存する(部屋と物体だけ。全PCに配られる)。直して何度でも保存し直せる",
+        "再生を止めると動かした分は消えるので、シーンにも同じ配置を残す(Transform の Copy Component → 再生後に Paste)",
         "終わったら「メニューに戻る」");
 
     public static readonly SceneInfo Recording = new SceneInfo(RecordingScene, "記録(このPCのキネクトだけ)",
@@ -56,17 +64,32 @@ public static class HomeSceneFlow
         new SceneInfo("Assets/0Scenes/2Analysis/6ArrivalCheck.unity", "到達の確認", "インスペクターで実験・実験対象者を選んで確認する"),
     };
 
+    // シーンマネージャーから開いたシーン(シーンを直接再生したときは null)
+    public static SceneInfo Active { get; private set; }
+
+    // シーンマネージャーから「部屋と物体の配置」として開いているか
+    public static bool IsRoomPlacement => Active == RoomPlacement;
+
+    // シーンマネージャーから「キャリブレーション」として開いているか
+    public static bool IsCalibration => Active == Setup;
+
     public static void Load(SceneInfo scene)
     {
+        Active = scene;
         HomeSceneFlowOverlay.Show(scene);
         LoadPath(scene.path);
     }
 
     public static void ReturnToMenu()
     {
+        Active = null;
         HomeSceneFlowOverlay.Hide();
         LoadPath(ManagerScene);
     }
+
+    // 再生を止めたら忘れる(エディタでドメインを再読み込みしない設定でも、次の再生に持ち越さない)
+    [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.SubsystemRegistration)]
+    private static void ResetOnPlay() => Active = null;
 
     private static void LoadPath(string path)
     {
