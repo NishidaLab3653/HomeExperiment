@@ -11,6 +11,7 @@ public static class HomeSyncStatus
         public string name;
         public string address;
         public string status;
+        public string[] kinectSerials = new string[0];
         public DateTime lastSeen;
 
         public bool IsAlive => (DateTime.Now - lastSeen).TotalSeconds < 10;

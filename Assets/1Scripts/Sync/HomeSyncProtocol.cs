@@ -260,6 +260,8 @@ public class HomeSyncRequest
     public string client;
     // 録画PCの状態(制御PCの一覧に表示する)
     public string clientStatus;
+    // 録画PCにつないでいるキネクトのシリアル番号(デバイスの番号順。制御PCのキネクトの割り当てに使う)
+    public string[] clientKinectSerials;
     public string experiment;
     public string path;
     public string guid;

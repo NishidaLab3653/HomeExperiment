@@ -124,13 +124,15 @@ public static class HomeSyncService
 
             HomeSyncStatus.Clients = server.GetClients().ConvertAll(c => new HomeSyncStatus.ClientInfo
             {
-                name = c.name, address = c.address, status = c.status, lastSeen = c.lastSeen
+                name = c.name, address = c.address, status = c.status, kinectSerials = c.kinectSerials, lastSeen = c.lastSeen
             });
             Drain(server.Logs);
         }
 
         if (client != null)
         {
+            HomeSyncSettings current = HomeSyncSettings.Current;
+            client.ReportedSerials = current.HasKinectsHere ? current.detectedSerials ?? new string[0] : new string[0];
             HomeSyncStatus.Connected = client.Connected;
             HomeSyncStatus.Status = client.Status;
             HomeSyncStatus.ServerDescription = client.ServerDescription;

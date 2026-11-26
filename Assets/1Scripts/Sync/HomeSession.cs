@@ -22,7 +22,59 @@ public class HomeSessionData
     public string updatedAt = "";
     public string updatedBy = "";
 
-    public HomeSessionData Clone() => (HomeSessionData)MemberwiseClone();
+    // キネクトの割り当て(制御PCで決めて全PCに配る)。どのキネクトを、どのPCの、どのキネクト本体で、どの同期モードで使うか
+    public HomeKinectAssignment[] kinectAssignments = new HomeKinectAssignment[0];
+
+    public bool HasKinectAssignments
+    {
+        get
+        {
+            if (kinectAssignments == null)
+                return false;
+
+            foreach (HomeKinectAssignment assignment in kinectAssignments)
+            {
+                if (assignment != null && assignment.IsAssigned)
+                    return true;
+            }
+
+            return false;
+        }
+    }
+
+    public HomeKinectAssignment FindAssignment(string kinectId)
+    {
+        if (kinectAssignments != null)
+        {
+            foreach (HomeKinectAssignment assignment in kinectAssignments)
+            {
+                if (assignment != null && assignment.kinectId == kinectId)
+                    return assignment;
+            }
+        }
+
+        return null;
+    }
+
+    public HomeSessionData Clone() => JsonUtility.FromJson<HomeSessionData>(JsonUtility.ToJson(this));
+}
+
+// キネクト1台の割り当て。録画PCは pcName が自分の名前のものだけを使う。
+// デバイスの番号はUSBのつなぎ方で変わることがあるので、キネクト本体はシリアル番号で決める(番号は見つからなかったときの予備)
+[Serializable]
+public class HomeKinectAssignment
+{
+    public string kinectId;
+    // 使うPCの名前(空なら使わない)
+    public string pcName = "";
+    public string serialNumber = "";
+    public int deviceIndex;
+    public HomeKinectDeviceIndex.SyncMode syncMode = HomeKinectDeviceIndex.SyncMode.Standalone;
+
+    public bool IsAssigned => !string.IsNullOrWhiteSpace(pcName);
+
+    public bool IsAssignedTo(string name) =>
+        IsAssigned && string.Equals(pcName.Trim(), (name ?? "").Trim(), StringComparison.OrdinalIgnoreCase);
 }
 
 public enum HomeSyncRole
@@ -139,6 +191,21 @@ public static class HomeSession
         }
     }
 
+    // 制御PCでキネクトの割り当てを変えて配信する(revision を 1 増やす)
+    public static HomeSessionData PublishKinectAssignments(HomeKinectAssignment[] assignments, string by)
+    {
+        HomeSessionData data = Current.Clone();
+        data.kinectAssignments = JsonUtility.FromJson<HomeSessionData>(
+            JsonUtility.ToJson(new HomeSessionData { kinectAssignments = assignments })).kinectAssignments;
+        data.revision++;
+        data.updatedAt = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
+        data.updatedBy = by;
+        HomeSyncPaths.WriteJson(HomeSyncPaths.SessionPath, data);
+        current = data;
+        currentStamp = File.GetLastWriteTimeUtc(HomeSyncPaths.SessionPath);
+        return data;
+    }
+
     // 制御PCで実験の名前・実験対象者を変えて配信する(revision を 1 増やす)
     public static HomeSessionData Publish(string experimentName, string subjectName, string by)
     {
@@ -180,26 +247,48 @@ public static class HomeSharedSession
     public static string DataRootDirectory(bool useSharedSession, string inspectorValue) =>
         IsActive(useSharedSession) ? HomeSyncSettings.Current.dataRootDirectory : inspectorValue;
 
-    public static HomeKinectDeviceIndex[] KinectTable(bool useSharedSession, HomeKinectDeviceIndex[] inspectorValue)
+    public static HomeKinectDeviceIndex[] KinectTable(bool useSharedSession, HomeKinectDeviceIndex[] inspectorValue) =>
+        IsActive(useSharedSession) ? ResolveKinectTable(HomeSyncSettings.Current, HomeSession.Current) : inspectorValue;
+
+    // このPCで使うキネクトの表。
+    //   このPCだけ      … このPCの設定の表
+    //   制御PC・録画PC … 制御PCが配った割り当てのうち、このPCの名前のものだけ使う。キネクト本体はシリアル番号でデバイスの番号に直す
+    //                     (キネクトをつながない制御PCは全部使わない。設定ファイルの表は書き換えない)
+    public static HomeKinectDeviceIndex[] ResolveKinectTable(HomeSyncSettings settings, HomeSessionData session)
     {
-        HomeSyncSettings settings = HomeSyncSettings.Current;
+        HomeKinectDeviceIndex[] table = settings.kinects != null && settings.kinects.Length > 0
+            ? settings.kinects
+            : HomeKinectDeviceIndex.CreateDefault();
 
-        if (!IsActive(useSharedSession) || settings.kinects == null || settings.kinects.Length == 0)
-            return inspectorValue;
+        if (!settings.UsesNetwork)
+            return table;
 
-        if (settings.HasKinectsHere)
-            return settings.kinects;
+        string[] serials = settings.detectedSerials ?? new string[0];
+        HomeKinectDeviceIndex[] result = new HomeKinectDeviceIndex[table.Length];
 
-        // キネクトをつながない制御PC: 表は残したまま、全部「使わない」にして返す(設定ファイルの表は書き換えない)
-        HomeKinectDeviceIndex[] none = new HomeKinectDeviceIndex[settings.kinects.Length];
-
-        for (int i = 0; i < none.Length; i++)
+        for (int i = 0; i < table.Length; i++)
         {
-            HomeKinectDeviceIndex source = settings.kinects[i];
-            none[i] = new HomeKinectDeviceIndex(source.kinectId, source.deviceIndex) { use = false, syncMode = source.syncMode };
+            string id = table[i].kinectId;
+            HomeKinectAssignment assignment = session?.FindAssignment(id);
+            bool mine = settings.HasKinectsHere && assignment != null && assignment.IsAssignedTo(settings.DisplayName);
+            int device = assignment != null ? assignment.deviceIndex : table[i].deviceIndex;
+
+            if (mine && !string.IsNullOrEmpty(assignment.serialNumber))
+            {
+                int found = Array.IndexOf(serials, assignment.serialNumber);
+
+                if (found >= 0)
+                    device = found;
+            }
+
+            result[i] = new HomeKinectDeviceIndex(id, Mathf.Max(0, device))
+            {
+                use = mine,
+                syncMode = assignment != null ? assignment.syncMode : HomeKinectDeviceIndex.SyncMode.Standalone
+            };
         }
 
-        return none;
+        return result;
     }
 }
 

@@ -57,6 +57,8 @@ public class HomeSyncClient
 
     // 同期ウィンドウに表示する状態
     public volatile string Status = "制御PCを探しています…";
+    // 制御PCに知らせる、このPCにつないでいるキネクトのシリアル番号(メインスレッドから差し替える)
+    public volatile string[] ReportedSerials = new string[0];
     public volatile string ServerDescription = "";
     public volatile string LastSyncedAt = "";
     public volatile bool Connected;
@@ -474,6 +476,7 @@ public class HomeSyncClient
     private HomeSyncResponse Request(HomeSyncRequest request, byte[] body, out byte[] responseBody)
     {
         request.client = clientName;
+        request.clientKinectSerials = ReportedSerials ?? new string[0];
 
         using (TcpClient connection = new TcpClient())
         {

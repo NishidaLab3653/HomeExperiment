@@ -19,6 +19,7 @@ public class HomeSyncServer
         public string name;
         public string address;
         public string status;
+        public string[] kinectSerials = new string[0];
         public DateTime lastSeen;
     }
 
@@ -251,6 +252,9 @@ public class HomeSyncServer
 
             if (!string.IsNullOrEmpty(request.clientStatus))
                 info.status = request.clientStatus;
+
+            if (request.clientKinectSerials != null)
+                info.kinectSerials = request.clientKinectSerials;
         }
     }
 

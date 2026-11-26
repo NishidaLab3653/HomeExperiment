@@ -5,7 +5,8 @@ using UnityEngine;
 // シーンマネージャー(Assets/0Scenes/HomeSceneManager.unity)の画面。再生すると、画面の案内に沿って
 //   - このPCの設定(役割・データの場所。制御PCはキネクトをつながないこともできる)
 //   - 実験(既存の実験を選ぶ / 新しく作る。既存の実験から部屋・位置・点群を引き継げる)
-//   - キネクト(このPCにつないでいるキネクトを調べて選ぶ。キネクトを使うPCだけ)
+//   - キネクト(制御PC: Kinect A〜D をどのPCのどのキネクト本体で使うかを決めて配る。
+//              録画PC: 配られた割り当てを確認する。このPCだけ: このPCのキネクトを選ぶ)
 //   - キャリブレーション(基準の点群を選んで、位置合わせのシーンへ。キネクトを使うPCだけ)
 //   - 部屋と物体の配置(保存済みの点群に合わせて部屋と物体を置く。制御PC・このPCだけ)
 //   - 記録(実験対象者を決めて、記録のシーンへ)
@@ -31,7 +32,27 @@ public class HomeSceneManagerUI : MonoBehaviour
 
     private const float VirtualHeight = 900f;
 
-    private static readonly string[] SyncModeLabels = { "シーンのまま", "単独", "Master", "Subordinate" };
+    // 同期ケーブルのモード(画面に出す順)
+    private static readonly HomeKinectDeviceIndex.SyncMode[] SyncModes =
+    {
+        HomeKinectDeviceIndex.SyncMode.Standalone,
+        HomeKinectDeviceIndex.SyncMode.Master,
+        HomeKinectDeviceIndex.SyncMode.Subordinate
+    };
+
+    private static readonly string[] SyncModeLabels = { "単独(ケーブルなし)", "Master(親)", "Subordinate(子)" };
+
+    private static readonly string[] SyncModeHelp =
+    {
+        "単独: 同期ケーブルを使わない。「記録(このPCのキネクトだけ)」で使う。",
+        "Master(親): 同期ケーブルの起点。全PCの中で1台だけ。このキネクトをつないだPCで Space を押すと、全PCの記録が始まる。",
+        "Subordinate(子): Master からの信号で撮る。ケーブルは Master の Sync Out → 子の Sync In → 子の Sync Out → 次の子の Sync In … とつなぐ。"
+    };
+
+    private static string SyncModeName(HomeKinectDeviceIndex.SyncMode mode) =>
+        mode == HomeKinectDeviceIndex.SyncMode.Master ? "Master" :
+        mode == HomeKinectDeviceIndex.SyncMode.Subordinate ? "Subordinate" :
+        mode == HomeKinectDeviceIndex.SyncMode.Standalone ? "単独" : "シーンの設定";
 
     private Page page = Page.Home;
     private Vector2 scroll;
@@ -55,8 +76,13 @@ public class HomeSceneManagerUI : MonoBehaviour
     private string subjectInput;
 
     // キネクト
-    private List<HomeKinectDetector.Device> detected;
     private string detectError;
+    private bool detecting;
+
+    // 制御PCで編集中のキネクトの割り当て(「全PCに配る」まではここだけ)
+    private HomeKinectAssignment[] assignmentDraft;
+    private long assignmentDraftRevision = -1;
+    private bool assignmentDirty;
 
     private GUIStyle titleStyle;
     private GUIStyle headStyle;
@@ -78,6 +104,48 @@ public class HomeSceneManagerUI : MonoBehaviour
         addressInput = settings.controlAddress;
         subjectInput = HomeSession.Current.subjectName;
         RefreshExperiments();
+
+        // キネクトを使うPCでは、開いたときにつないでいるキネクトを調べる(録画PCはその結果が制御PCに届く)
+        if (settings.role != HomeSyncRole.Off && settings.HasKinectsHere)
+            StartCoroutine(DetectAfterFirstFrame());
+    }
+
+    private System.Collections.IEnumerator DetectAfterFirstFrame()
+    {
+        detecting = true;
+        yield return null;
+        DetectKinects(false);
+    }
+
+    // つないでいるキネクトのシリアル番号を調べて、このPCの設定に残す
+    private void DetectKinects(bool notify)
+    {
+        detecting = false;
+        HomeSyncSettings settings = HomeSyncSettings.Current;
+        List<HomeKinectDetector.Device> devices = HomeKinectDetector.Detect(out detectError);
+
+        if (detectError != null)
+        {
+            if (notify)
+                Notify(detectError, true);
+            return;
+        }
+
+        string[] previous = settings.detectedSerials ?? new string[0];
+        string[] serials = new string[devices.Count];
+
+        for (int i = 0; i < devices.Count; i++)
+        {
+            // 使用中で読めなかったときは、前に読めた同じ番号のものを残す
+            serials[i] = devices[i].serialNumber ?? (i < previous.Length ? previous[i] : "");
+        }
+
+        HomeSyncSettings edited = settings.Clone();
+        edited.detectedSerials = serials;
+        SaveSettings(edited);
+
+        if (notify)
+            Notify(devices.Count == 0 ? "キネクトが見つかりません。USBと電源を確認してください。" : $"キネクトを {devices.Count} 台見つけました。", devices.Count == 0);
     }
 
     private void Update()
@@ -241,11 +309,13 @@ public class HomeSceneManagerUI : MonoBehaviour
         Card(Page.Pc, $"{number++}. このPCの設定", PcSummary(settings), next);
         Card(Page.Experiment, $"{number++}. 実験", ExperimentSummaryText(), next);
 
-        if (settings.HasKinectsHere)
-        {
+        if (settings.role == HomeSyncRole.Control)
+            Card(Page.Kinects, $"{number++}. キネクトの割り当て", AssignmentSummary(), next);
+        else if (settings.HasKinectsHere)
             Card(Page.Kinects, $"{number++}. キネクト", KinectSummary(settings), next);
+
+        if (settings.HasKinectsHere)
             Card(Page.Calibration, $"{number++}. キャリブレーション", CalibrationSummary(settings), next);
-        }
 
         if (settings.CanEditRoom)
             Card(Page.Room, $"{number++}. 部屋と物体の配置", RoomSummary(), next);
@@ -291,11 +361,19 @@ public class HomeSceneManagerUI : MonoBehaviour
             return settings.CanEditSession ? Page.Experiment : (settings.UsesNetwork ? Page.Sync : Page.Experiment);
         }
 
+        if (settings.role == HomeSyncRole.Control && !session.HasKinectAssignments)
+        {
+            text = "キネクトをどのPCで使うか決めて、全PCに配る";
+            return Page.Kinects;
+        }
+
         if (settings.HasKinectsHere)
         {
             if (UsedKinects(settings).Count == 0)
             {
-                text = "このPCで使うキネクトを選ぶ";
+                text = settings.role == HomeSyncRole.Recorder ? "制御PCでこのPCのキネクトが割り当てられるのを待つ" :
+                       settings.role == HomeSyncRole.Control ? "このPCのキネクトを割り当てる(このPCで使わないなら、このPCの設定で「つながない」にする)" :
+                       "このPCで使うキネクトを選ぶ";
                 return Page.Kinects;
             }
 
@@ -338,8 +416,12 @@ public class HomeSceneManagerUI : MonoBehaviour
         return Page.Recording;
     }
 
+    // このPCで使うキネクトの表(制御PC・録画PCは、配られた割り当てから作る)
+    private static HomeKinectDeviceIndex[] MyKinectTable(HomeSyncSettings settings) =>
+        HomeSharedSession.ResolveKinectTable(settings, HomeSession.Current);
+
     private static List<HomeKinectDeviceIndex> UsedKinects(HomeSyncSettings settings) =>
-        new List<HomeKinectDeviceIndex>(Array.FindAll(settings.kinects ?? new HomeKinectDeviceIndex[0], k => k.use));
+        new List<HomeKinectDeviceIndex>(Array.FindAll(MyKinectTable(settings), k => k.use));
 
     private List<string> MissingPoses(HomeSyncSettings settings)
     {
@@ -394,8 +476,31 @@ public class HomeSceneManagerUI : MonoBehaviour
             return "使うキネクトがまだ選ばれていません";
 
         return "このPCで使う: " + string.Join(", ", used.ConvertAll(k =>
-            $"Kinect {k.kinectId}(デバイス {k.deviceIndex}{(k.syncMode == HomeKinectDeviceIndex.SyncMode.KeepComponent ? "" : " / " + SyncModeLabels[(int)k.syncMode])})"));
+            $"Kinect {k.kinectId}({SerialLabel(settings.detectedSerials, k.deviceIndex)} / {SyncModeName(k.syncMode)})"));
     }
+
+    private static string AssignmentSummary()
+    {
+        HomeSessionData session = HomeSession.Current;
+
+        if (!session.HasKinectAssignments)
+            return "まだ割り当てていません";
+
+        List<string> parts = new List<string>();
+
+        foreach (HomeKinectAssignment a in session.kinectAssignments)
+        {
+            if (a != null && a.IsAssigned)
+                parts.Add($"{a.kinectId} → {a.pcName}({SyncModeName(a.syncMode)})");
+        }
+
+        return string.Join(" / ", parts);
+    }
+
+    private static string SerialLabel(string[] serials, int index) =>
+        serials != null && index >= 0 && index < serials.Length && !string.IsNullOrEmpty(serials[index])
+            ? $"SN {serials[index]}"
+            : $"デバイス {index}";
 
     private string CalibrationSummary(HomeSyncSettings settings)
     {
@@ -473,17 +578,7 @@ public class HomeSceneManagerUI : MonoBehaviour
         if (settings.role == HomeSyncRole.Control)
         {
             GUILayout.Space(8);
-            bool noKinects = GUILayout.Toggle(settings.noKinectsHere,
-                " このPCにはキネクトをつながない(実験・部屋・実験対象者を決めるだけで、記録は録画PCで行う)", toggleStyle);
-
-            if (noKinects != settings.noKinectsHere)
-            {
-                HomeSyncSettings edited = settings.Clone();
-                edited.noKinectsHere = noKinects;
-                SaveSettings(edited);
-                settings = edited;
-                Notify(noKinects ? "このPCではキネクトを使わないようにしました。" : "このPCでもキネクトを使うようにしました。");
-            }
+            settings = DrawNoKinectsToggle(settings);
         }
 
         GUILayout.Space(12);
@@ -683,61 +778,346 @@ public class HomeSceneManagerUI : MonoBehaviour
     {
         HomeSyncSettings settings = HomeSyncSettings.Current;
 
-        if (!settings.HasKinectsHere)
-        {
+        if (settings.role == HomeSyncRole.Control)
+            DrawKinectAssignment(settings);
+        else if (!settings.HasKinectsHere)
             DrawNoKinectsHere();
+        else if (settings.role == HomeSyncRole.Recorder)
+            DrawKinectsOnRecorder(settings);
+        else
+            DrawKinectsSingle(settings);
+    }
+
+    // このPCにつないでいるキネクト(調べるボタンと、シリアル番号の一覧)
+    private void DrawDetectedKinects(HomeSyncSettings settings, string title)
+    {
+        GUILayout.Label(title, textStyle);
+
+        if (detecting)
+        {
+            GUILayout.Label("キネクトを調べています…", smallStyle);
             return;
         }
-        Heading("キネクト", "このPCにUSBでつないでいるキネクトを選びます。まず「つながっているキネクトを調べる」を押してください。" +
-                            "同期ケーブルを使うときは、全PCの中で1台だけ Master、他は Subordinate にします。");
 
-        if (GUILayout.Button("つながっているキネクトを調べる", bigButton))
+        string[] serials = settings.detectedSerials ?? new string[0];
+
+        if (serials.Length == 0)
+            GUILayout.Label("見つかっていません。USBと電源をつないでから「調べ直す」を押してください。", smallStyle);
+
+        for (int i = 0; i < serials.Length; i++)
+            GUILayout.Label($"・SN {(string.IsNullOrEmpty(serials[i]) ? "(使用中のため読めませんでした)" : serials[i])}", smallStyle);
+
+        if (GUILayout.Button("調べ直す", buttonStyle, GUILayout.Width(160)))
+            DetectKinects(true);
+    }
+
+    private void DrawSyncModeHelp()
+    {
+        GUILayout.BeginVertical(boxStyle);
+        GUILayout.Label("同期ケーブルのモード", textStyle);
+
+        foreach (string help in SyncModeHelp)
+            GUILayout.Label($"・{help}", smallStyle);
+
+        GUILayout.EndVertical();
+    }
+
+    private int SyncModeToolbar(HomeKinectDeviceIndex.SyncMode mode)
+    {
+        int index = Array.IndexOf(SyncModes, mode);
+        int picked = GUILayout.Toolbar(index, SyncModeLabels, buttonStyle);
+        return picked;
+    }
+
+    // ---------- 制御PC: 全PCのキネクトの割り当て ----------
+
+    private class PcKinects
+    {
+        public string name;
+        public string label;
+        public string[] serials;
+    }
+
+    // 割り当て先に選べるPC(このPC・つながっている録画PC・前に割り当てたPC)
+    private List<PcKinects> AssignablePcs(HomeSyncSettings settings)
+    {
+        List<PcKinects> pcs = new List<PcKinects>();
+
+        if (settings.HasKinectsHere)
+            pcs.Add(new PcKinects { name = settings.DisplayName, label = $"{settings.DisplayName}(このPC)", serials = settings.detectedSerials ?? new string[0] });
+
+        foreach (HomeSyncStatus.ClientInfo client in HomeSyncStatus.Clients)
         {
-            detected = HomeKinectDetector.Detect(out detectError);
+            if (pcs.Exists(p => string.Equals(p.name, client.name, StringComparison.OrdinalIgnoreCase)))
+                continue;
 
-            if (detectError == null)
+            pcs.Add(new PcKinects
             {
-                HomeSyncSettings edited = settings.Clone();
-                edited.detectedSerials = detected.ConvertAll(d => d.serialNumber ?? "").ToArray();
-                SaveSettings(edited);
-                settings = edited;
-                Notify(detected.Count == 0 ? "キネクトが見つかりません。USBと電源を確認してください。" : $"キネクトを {detected.Count} 台見つけました。", detected.Count == 0);
-            }
-            else
-            {
-                Notify(detectError, true);
-            }
+                name = client.name,
+                label = client.IsAlive ? client.name : $"{client.name}(切断中)",
+                serials = client.kinectSerials ?? new string[0]
+            });
         }
 
-        int deviceCount = Mathf.Max(1, settings.detectedSerials?.Length ?? 0);
+        foreach (HomeKinectAssignment a in assignmentDraft)
+        {
+            if (a.IsAssigned && !pcs.Exists(p => string.Equals(p.name, a.pcName.Trim(), StringComparison.OrdinalIgnoreCase)))
+                pcs.Add(new PcKinects { name = a.pcName.Trim(), label = $"{a.pcName.Trim()}(つながっていない)", serials = new string[0] });
+        }
 
-        if (settings.detectedSerials != null && settings.detectedSerials.Length > 0)
+        return pcs;
+    }
+
+    private void EnsureAssignmentDraft(HomeSyncSettings settings)
+    {
+        HomeSessionData session = HomeSession.Current;
+
+        if (assignmentDraft != null && (assignmentDirty || assignmentDraftRevision == session.revision))
+            return;
+
+        HomeKinectDeviceIndex[] ids = settings.kinects != null && settings.kinects.Length > 0 ? settings.kinects : HomeKinectDeviceIndex.CreateDefault();
+        assignmentDraft = new HomeKinectAssignment[ids.Length];
+
+        for (int i = 0; i < ids.Length; i++)
         {
-            for (int i = 0; i < settings.detectedSerials.Length; i++)
+            HomeKinectAssignment saved = session.FindAssignment(ids[i].kinectId);
+            assignmentDraft[i] = saved != null
+                ? JsonUtility.FromJson<HomeKinectAssignment>(JsonUtility.ToJson(saved))
+                : new HomeKinectAssignment { kinectId = ids[i].kinectId };
+        }
+
+        assignmentDraftRevision = session.revision;
+        assignmentDirty = false;
+    }
+
+    private void DrawKinectAssignment(HomeSyncSettings settings)
+    {
+        Heading("キネクトの割り当て", "Kinect A〜D を、どのPCにつないだどのキネクト本体で使うかを、ここでまとめて決めます。" +
+                                    "「全PCに配る」を押すと、録画PCは配られたとおりにキネクトを使います(録画PCで選ぶ必要はありません)。");
+
+        GUILayout.Label("手順", textStyle);
+        GUILayout.Label("1. 録画PCでもシーンマネージャーを開く(つないでいるキネクトのシリアル番号が、ここに届きます)", smallStyle);
+        GUILayout.Label("2. Kinect A〜D ごとに、使うPCとキネクト本体(シリアル番号。本体の裏に書いてあります)を選ぶ。使わないキネクトは「使わない」", smallStyle);
+        GUILayout.Label("3. 同期ケーブルのモードを選ぶ(下の説明)", smallStyle);
+        GUILayout.Label("4. 「全PCに配る」を押す", smallStyle);
+        GUILayout.Space(6);
+
+        settings = DrawNoKinectsToggle(settings);
+
+        if (settings.HasKinectsHere)
+            DrawDetectedKinects(settings, "このPCにつないでいるキネクト");
+
+        GUILayout.Space(6);
+        DrawSyncModeHelp();
+        GUILayout.Space(6);
+
+        EnsureAssignmentDraft(settings);
+        List<PcKinects> pcs = AssignablePcs(settings);
+        HomeExperimentCatalog.ExperimentSummary experiment = CurrentExperiment;
+
+        if (pcs.Count == 0)
+            GUILayout.Label("<color=#ffb060>割り当てられるPCがありません。録画PCでシーンマネージャーを開き、役割を「録画PC」にしてください。</color>", textStyle);
+
+        string[] pcLabels = new string[pcs.Count + 1];
+        pcLabels[0] = "使わない";
+
+        for (int i = 0; i < pcs.Count; i++)
+            pcLabels[i + 1] = pcs[i].label;
+
+        foreach (HomeKinectAssignment entry in assignmentDraft)
+        {
+            GUILayout.BeginVertical(boxStyle);
+            HomeExperimentCatalog.KinectEnv env = experiment?.Kinect(entry.kinectId);
+            string pose = env != null && env.hasPose ? "この実験で位置合わせ済み" : "この実験ではまだ位置合わせしていません";
+            GUILayout.Label($"<b>Kinect {entry.kinectId}</b>　<size=14>{pose}</size>", textStyle);
+
+            int pcIndex = entry.IsAssigned ? pcs.FindIndex(p => string.Equals(p.name, entry.pcName.Trim(), StringComparison.OrdinalIgnoreCase)) + 1 : 0;
+            GUILayout.Label("使うPC", smallStyle);
+            int pickedPc = GUILayout.SelectionGrid(pcIndex, pcLabels, Mathf.Min(4, pcLabels.Length), buttonStyle);
+
+            if (pickedPc != pcIndex)
             {
-                string serial = settings.detectedSerials[i];
-                GUILayout.Label($"デバイス {i}: {(string.IsNullOrEmpty(serial) ? "使用中のためシリアル番号を読めませんでした" : "SN " + serial)}", smallStyle);
+                entry.pcName = pickedPc == 0 ? "" : pcs[pickedPc - 1].name;
+                entry.serialNumber = "";
+                entry.deviceIndex = 0;
+                assignmentDirty = true;
             }
+
+            if (entry.IsAssigned && pickedPc > 0)
+            {
+                PcKinects pc = pcs[pickedPc - 1];
+                GUILayout.Label("キネクト本体(シリアル番号)", smallStyle);
+
+                if (pc.serials.Length == 0)
+                {
+                    GUILayout.Label($"<color=#ffb060>{pc.name} のキネクトがまだ届いていません。{pc.name} でシーンマネージャーを開き、キネクトをUSBでつないでください。</color>", smallStyle);
+                }
+                else
+                {
+                    string[] serialLabels = new string[pc.serials.Length];
+
+                    for (int i = 0; i < pc.serials.Length; i++)
+                    {
+                        string serial = pc.serials[i];
+                        HomeKinectAssignment other = Array.Find(assignmentDraft, a => a != entry && a.IsAssignedTo(pc.name) && !string.IsNullOrEmpty(serial) && a.serialNumber == serial);
+                        serialLabels[i] = (string.IsNullOrEmpty(serial) ? $"デバイス {i}(SN 不明)" : $"SN {serial}") + (other != null ? $"(Kinect {other.kinectId} で使用)" : "");
+                    }
+
+                    int serialIndex = !string.IsNullOrEmpty(entry.serialNumber) ? Array.IndexOf(pc.serials, entry.serialNumber) : -1;
+                    int pickedSerial = GUILayout.SelectionGrid(serialIndex, serialLabels, Mathf.Min(2, serialLabels.Length), buttonStyle);
+
+                    if (pickedSerial != serialIndex && pickedSerial >= 0)
+                    {
+                        entry.serialNumber = pc.serials[pickedSerial] ?? "";
+                        entry.deviceIndex = pickedSerial;
+                        assignmentDirty = true;
+                    }
+
+                    if (serialIndex < 0 && !string.IsNullOrEmpty(entry.serialNumber))
+                        GUILayout.Label($"<color=#ffb060>前に選んだ SN {entry.serialNumber} は、いま {pc.name} につながっていません。</color>", smallStyle);
+                }
+
+                GUILayout.Label("同期ケーブル", smallStyle);
+                int pickedMode = SyncModeToolbar(entry.syncMode);
+
+                if (pickedMode >= 0 && SyncModes[pickedMode] != entry.syncMode)
+                {
+                    entry.syncMode = SyncModes[pickedMode];
+                    assignmentDirty = true;
+                }
+            }
+
+            GUILayout.EndVertical();
         }
-        else
-        {
-            GUILayout.Label("まだ調べていません。", smallStyle);
-            deviceCount = 4;
-        }
+
+        List<string> problems = CheckAssignments(assignmentDraft);
+
+        foreach (string problem in problems)
+            GUILayout.Label($"<color=#ff8080>{problem}</color>", textStyle);
 
         GUILayout.Space(8);
-        HomeSyncSettings working = settings.Clone();
-        bool changed = false;
-        HomeExperimentCatalog.ExperimentSummary experiment = CurrentExperiment;
+
+        using (new GUILayout.HorizontalScope())
+        {
+            GUI.enabled = assignmentDirty && problems.Count == 0;
+
+            if (GUILayout.Button(assignmentDirty ? "全PCに配る" : "配った割り当てのまま", bigButton))
+            {
+                HomeSession.PublishKinectAssignments(assignmentDraft, settings.DisplayName);
+                assignmentDraftRevision = HomeSession.Current.revision;
+                assignmentDirty = false;
+                Notify("キネクトの割り当てを全PCに配りました。");
+            }
+
+            GUI.enabled = assignmentDirty;
+
+            if (GUILayout.Button("元に戻す", bigButton, GUILayout.Width(160)))
+            {
+                assignmentDirty = false;
+                assignmentDraft = null;
+            }
+
+            GUI.enabled = true;
+        }
+
+        if (settings.HasKinectsHere)
+            NextButton(Page.Calibration, "次へ: キャリブレーション");
+        else
+            NextButton(Page.Room, "次へ: 部屋と物体の配置");
+    }
+
+    private static List<string> CheckAssignments(HomeKinectAssignment[] assignments)
+    {
+        List<string> problems = new List<string>();
+        HashSet<string> devices = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        int masters = 0;
+        int subordinates = 0;
+
+        foreach (HomeKinectAssignment a in assignments)
+        {
+            if (!a.IsAssigned)
+                continue;
+
+            if (string.IsNullOrEmpty(a.serialNumber))
+                problems.Add($"Kinect {a.kinectId} のキネクト本体が選ばれていません。");
+            else if (!devices.Add($"{a.pcName.Trim()}/{a.serialNumber}"))
+                problems.Add($"同じキネクト本体(SN {a.serialNumber})を2つに割り当てています。");
+
+            if (a.syncMode == HomeKinectDeviceIndex.SyncMode.Master)
+                masters++;
+            else if (a.syncMode == HomeKinectDeviceIndex.SyncMode.Subordinate)
+                subordinates++;
+        }
+
+        if (masters > 1)
+            problems.Add("Master が2台以上あります。Master は全体で1台だけにします。");
+
+        if (subordinates > 0 && masters == 0)
+            problems.Add("Subordinate があるのに Master がありません。同期ケーブルの起点のキネクトを Master にしてください。");
+
+        return problems;
+    }
+
+    // ---------- 録画PC: 配られた割り当ての確認 ----------
+
+    private void DrawKinectsOnRecorder(HomeSyncSettings settings)
+    {
+        Heading("キネクト", "キネクトの割り当ては制御PCでまとめて決めます。このPCにつないでいるキネクトのシリアル番号は、制御PCに自動で届きます。" +
+                            "ここでは、配られた割り当てを確認します。");
+
+        DrawDetectedKinects(settings, "このPCにつないでいるキネクト");
+        GUILayout.Space(8);
+        GUILayout.Label($"制御PCから配られた、このPC({settings.DisplayName})の割り当て", textStyle);
+
+        HomeSessionData session = HomeSession.Current;
+        string[] serials = settings.detectedSerials ?? new string[0];
+        bool any = false;
+
+        foreach (HomeKinectAssignment a in session.kinectAssignments ?? new HomeKinectAssignment[0])
+        {
+            if (a == null || !a.IsAssignedTo(settings.DisplayName))
+                continue;
+
+            any = true;
+            bool found = !string.IsNullOrEmpty(a.serialNumber) && Array.IndexOf(serials, a.serialNumber) >= 0;
+            string state = found ? "✓ つながっています" : "<color=#ff8080>このPCに見つかりません(USBを確認して「調べ直す」)</color>";
+            GUILayout.Label($"・<b>Kinect {a.kinectId}</b>: SN {a.serialNumber} / {SyncModeName(a.syncMode)}　{state}", textStyle);
+        }
+
+        if (!any)
+            GUILayout.Label($"<color=#ffb060>まだこのPCに割り当てられたキネクトはありません。制御PCの「キネクトの割り当て」で、このPC({settings.DisplayName})を選んでもらってください。</color>", textStyle);
+
+        GUILayout.Space(6);
+        DrawSyncModeHelp();
+        NextButton(Page.Calibration, "次へ: キャリブレーション");
+    }
+
+    // ---------- このPCだけ: このPCのキネクトを選ぶ ----------
+
+    private void DrawKinectsSingle(HomeSyncSettings settings)
+    {
+        Heading("キネクト", "このPCで使うキネクトを選びます。Kinect A〜D ごとに、使うかどうかと、どのキネクト本体(シリアル番号)かを選んでください。");
+
+        DrawDetectedKinects(settings, "このPCにつないでいるキネクト");
+        GUILayout.Space(6);
+        DrawSyncModeHelp();
+        GUILayout.Space(6);
+
+        string[] serials = settings.detectedSerials ?? new string[0];
+        int deviceCount = Mathf.Max(serials.Length, 1);
         string[] deviceLabels = new string[deviceCount];
 
         for (int i = 0; i < deviceCount; i++)
-            deviceLabels[i] = $"デバイス {i}";
+            deviceLabels[i] = SerialLabel(serials, i);
+
+        HomeSyncSettings working = settings.Clone();
+        bool changed = false;
+        HomeExperimentCatalog.ExperimentSummary experiment = CurrentExperiment;
 
         foreach (HomeKinectDeviceIndex entry in working.kinects)
         {
             GUILayout.BeginVertical(boxStyle);
-            bool use = GUILayout.Toggle(entry.use, $" <b>Kinect {entry.kinectId}</b> をこのPCで使う", toggleStyle);
+            bool use = GUILayout.Toggle(entry.use, $" <b>Kinect {entry.kinectId}</b> を使う", toggleStyle);
 
             if (use != entry.use)
             {
@@ -747,15 +1127,25 @@ public class HomeSceneManagerUI : MonoBehaviour
 
             if (entry.use)
             {
-                int device = GUILayout.Toolbar(Mathf.Clamp(entry.deviceIndex, 0, deviceCount - 1), deviceLabels, buttonStyle);
-                int sync = GUILayout.Toolbar((int)entry.syncMode, SyncModeLabels, buttonStyle);
+                GUILayout.Label("キネクト本体", smallStyle);
+                int device = GUILayout.SelectionGrid(Mathf.Clamp(entry.deviceIndex, 0, deviceCount - 1), deviceLabels, Mathf.Min(2, deviceCount), buttonStyle);
+                GUILayout.Label("同期ケーブル", smallStyle);
+                int mode = SyncModeToolbar(entry.syncMode);
 
-                if (device != entry.deviceIndex || sync != (int)entry.syncMode)
+                if (device != entry.deviceIndex)
                 {
                     entry.deviceIndex = device;
-                    entry.syncMode = (HomeKinectDeviceIndex.SyncMode)sync;
                     changed = true;
                 }
+
+                if (mode >= 0 && SyncModes[mode] != entry.syncMode)
+                {
+                    entry.syncMode = SyncModes[mode];
+                    changed = true;
+                }
+
+                if (Array.IndexOf(SyncModes, entry.syncMode) < 0)
+                    GUILayout.Label("同期ケーブルのモードが選ばれていません(記録のシーンの設定のまま動きます)。", smallStyle);
 
                 GUILayout.Label(KinectHint(working, entry, experiment), smallStyle);
             }
@@ -763,7 +1153,7 @@ public class HomeSceneManagerUI : MonoBehaviour
             GUILayout.EndVertical();
         }
 
-        string problem = CheckKinectTable(working);
+        string problem = CheckKinectTable(working.kinects);
 
         if (problem != null)
             GUILayout.Label($"<color=#ff8080>{problem}</color>", textStyle);
@@ -794,13 +1184,13 @@ public class HomeSceneManagerUI : MonoBehaviour
             : $"<color=#ffb060>注意: 位置合わせしたのは SN {saved} のキネクトですが、選んでいるデバイスは SN {selected} です。</color>";
     }
 
-    private static string CheckKinectTable(HomeSyncSettings settings)
+    private static string CheckKinectTable(HomeKinectDeviceIndex[] table)
     {
         HashSet<int> devices = new HashSet<int>();
         int masters = 0;
         int used = 0;
 
-        foreach (HomeKinectDeviceIndex entry in settings.kinects)
+        foreach (HomeKinectDeviceIndex entry in table)
         {
             if (!entry.use)
                 continue;
@@ -876,7 +1266,7 @@ public class HomeSceneManagerUI : MonoBehaviour
 
         GUILayout.Label("この実験のキネクトの状態", textStyle);
 
-        foreach (HomeKinectDeviceIndex entry in settings.kinects)
+        foreach (HomeKinectDeviceIndex entry in MyKinectTable(settings))
         {
             HomeExperimentCatalog.KinectEnv env = experiment?.Kinect(entry.kinectId);
             string pose = env != null && env.hasPose ? "位置 ✓" : "位置 未";
@@ -1069,7 +1459,7 @@ public class HomeSceneManagerUI : MonoBehaviour
         if (settings.role == HomeSyncRole.Recorder && !HomeSyncStatus.Connected)
             problems.Add("制御PCにつながっていません(実験・実験対象者が最新でない可能性があります)。");
 
-        string tableProblem = CheckKinectTable(settings);
+        string tableProblem = CheckKinectTable(MyKinectTable(settings));
 
         if (tableProblem != null && UsedKinects(settings).Count > 0)
             problems.Add(tableProblem);
@@ -1079,8 +1469,29 @@ public class HomeSceneManagerUI : MonoBehaviour
 
     private void DrawNoKinectsHere()
     {
-        Heading("キネクト", "このPCは「キネクトをつながない制御PC」なので、キネクトとキャリブレーションは録画PCで行います。");
-        NextButton(Page.Pc, "このPCの設定を変える");
+        Heading("キネクト", "このPCは「キネクトをつながない制御PC」なので、キネクトとキャリブレーションは録画PCで行います。" +
+                            "このPCにもキネクトをつなぐときは、下のチェックを外してください。");
+        DrawNoKinectsToggle(HomeSyncSettings.Current);
+        NextButton(Page.Home, "メニューへ戻る");
+    }
+
+    // 制御PCだけ: キネクトをつながないかどうか(PCの設定とキネクトのページの両方に出す)
+    private HomeSyncSettings DrawNoKinectsToggle(HomeSyncSettings settings)
+    {
+        if (settings.role != HomeSyncRole.Control)
+            return settings;
+
+        bool noKinects = GUILayout.Toggle(settings.noKinectsHere,
+            " このPCにはキネクトをつながない(実験・部屋・実験対象者を決めるだけで、記録は録画PCで行う)", toggleStyle);
+
+        if (noKinects == settings.noKinectsHere)
+            return settings;
+
+        HomeSyncSettings edited = settings.Clone();
+        edited.noKinectsHere = noKinects;
+        SaveSettings(edited);
+        Notify(noKinects ? "このPCではキネクトを使わないようにしました。" : "このPCでもキネクトを使うようにしました。");
+        return edited;
     }
 
     // ------------------------------------------------------------
