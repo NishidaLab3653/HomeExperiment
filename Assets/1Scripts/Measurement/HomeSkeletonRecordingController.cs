@@ -26,7 +26,7 @@ public class HomeSkeletonRecordingController : MonoBehaviour, IHomeDataRootProvi
     [Header("Subject")]
     [HomeExperimentFolder(HomeExperimentFolderAttribute.Kind.Subject)]
     [SerializeField] private string subjectName = "";
-    [Tooltip("オンにすると、同期(Window > Home Experiment Sync)を使っているPCでは、上の Data Root Directory と実験対象者の代わりに\n" +
+    [Tooltip("オンにすると、コントロールパネル(HomeExperiment > コントロールパネル)を使っているPCでは、上の Data Root Directory と実験対象者の代わりに\n" +
              "同期ウィンドウのデータの場所と、制御PCが配った実験対象者を使う(実験の名前は HomeEnvLoader が同じように受け取る)。\n" +
              "同期を使っていないPCではインスペクターの値を使う。")]
     [SerializeField] private bool useSharedSession = true;
@@ -75,6 +75,9 @@ public class HomeSkeletonRecordingController : MonoBehaviour, IHomeDataRootProvi
     public string SubjectName => isRecording ? recordingSubjectName : HomeSharedSession.SubjectName(useSharedSession, subjectName);
 
     private string recordingSubjectName;
+
+    // 同期(コントロールパネル)を使っているPCでは、このPCの設定のキネクトの表を使う
+    private HomeKinectDeviceIndex[] KinectTable => HomeSharedSession.KinectTable(useSharedSession, kinectDeviceIndices);
     private readonly List<HomeSkeletonRecorder> activeRecorders = new List<HomeSkeletonRecorder>();
     private bool isRecording;
     private double recordingStartClock;
@@ -96,7 +99,7 @@ public class HomeSkeletonRecordingController : MonoBehaviour, IHomeDataRootProvi
 
         // 各キネクトはカメラを Start で開くので、それより前(Awake)に表示/非表示・deviceIndex・syncMode を反映する。
         // HomeEnvLoader(Awake で表示中のキネクトの位置姿勢を読む)より先に実行されるよう DefaultExecutionOrder を下げてある。
-        HomeKinectDeviceIndex.ApplyToScene(kinectDeviceIndices);
+        HomeKinectDeviceIndex.ApplyToScene(KinectTable);
         HomeKinectDeviceIndex.WarnDuplicates(nameof(HomeSkeletonRecordingController));
 
         if (recorders == null || recorders.Length == 0)
@@ -119,7 +122,7 @@ public class HomeSkeletonRecordingController : MonoBehaviour, IHomeDataRootProvi
 
     private void OnValidate()
     {
-        HomeKinectDeviceIndex.ApplyToSceneInEditor(kinectDeviceIndices, this, ref kinectTableLoaded);
+        HomeKinectDeviceIndex.ApplyToSceneInEditor(KinectTable, this, ref kinectTableLoaded);
     }
 #endif
 

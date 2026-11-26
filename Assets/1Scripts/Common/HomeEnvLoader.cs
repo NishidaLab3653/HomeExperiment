@@ -14,7 +14,7 @@ public class HomeEnvLoader : MonoBehaviour, IHomeExperimentNameProvider
     [Header("Experiment")]
     [HomeExperimentFolder(HomeExperimentFolderAttribute.Kind.Experiment)]
     [SerializeField] private string experimentName = "";
-    [Tooltip("オンにすると、同期(Window > Home Experiment Sync)を使っているPCでは、上の実験の名前の代わりに制御PCが配った実験の名前を使う。\n" +
+    [Tooltip("オンにすると、コントロールパネル(HomeExperiment > コントロールパネル)を使っているPCでは、上の実験の名前の代わりに制御PCが配った実験の名前を使う。\n" +
              "計測のシーン(1HeadDirRecording / 1HeadDirRecordingMulti)でオンにする。分析のシーンではオフのまま。")]
     [SerializeField] private bool useSharedSession = false;
 

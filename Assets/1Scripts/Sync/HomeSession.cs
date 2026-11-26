@@ -6,11 +6,11 @@ using UnityEngine;
 //
 // どちらも <プロジェクト>/UserSettings/ に置く(git では共有しない、PCごとのファイル)。
 //   HomeExperimentSession.json … セッション。制御PCで決めて配信し、録画PCは同期で受け取って上書きする
-//   HomeExperimentSync.json    … このPCの役割(制御PC / 録画PC / 使わない)、データの場所、制御PCのアドレスなど
+//   HomeExperimentSync.json    … このPCの役割、データの場所、制御PCのアドレス、このPCで使うキネクト、位置合わせの基準など
 //
 // 計測のシーン(0HomeSetup / 1HeadDirRecording / 1HeadDirRecordingMulti)のコンポーネントは、
 // Use Shared Session がオンで、このPCの役割が「使わない」以外なら、インスペクターの値ではなくここの値を使う
-// (HomeSharedSession)。同期ウィンドウは メニューの Window > Home Experiment Sync。
+// (HomeSharedSession)。設定はメニューの HomeExperiment > コントロールパネル で行う。
 
 [Serializable]
 public class HomeSessionData
@@ -32,7 +32,9 @@ public enum HomeSyncRole
     // 制御PC: セッションと Env を持ち、録画PCに配る
     Control,
     // 録画PC: 制御PCからセッションと Env を受け取り、自分で保存した Env を制御PCへ送る
-    Recorder
+    Recorder,
+    // このPCだけで使う: ネットワークは使わず、コントロールパネルの設定だけを使う
+    Single
 }
 
 [Serializable]
@@ -47,9 +49,24 @@ public class HomeSyncSettings
     public string controlAddress = "";
     public int port = HomeSyncProtocol.DefaultPort;
 
+    // このPCで使うキネクト(使うか・デバイス番号・同期ケーブルでの役割)。シーンの Kinects の表の代わりに使う
+    public HomeKinectDeviceIndex[] kinects = HomeKinectDeviceIndex.CreateDefault();
+    // キネクトのデバイス番号ごとのシリアル番号(コントロールパネルで調べたときの記録。表示用)
+    public string[] detectedSerials = new string[0];
+
+    // 位置合わせ(シーン0)の基準にするキネクトと、その点群をどこから取るか
+    public string referenceKinectId = "A";
+    public HomeEnvSetup.ReferencePointCloudSource referencePointCloudSource = HomeEnvSetup.ReferencePointCloudSource.SavedEnvIfExists;
+
     public string DisplayName => string.IsNullOrWhiteSpace(pcName) ? Environment.MachineName : pcName.Trim();
 
-    public HomeSyncSettings Clone() => (HomeSyncSettings)MemberwiseClone();
+    // ネットワークを使う役割か
+    public bool UsesNetwork => role == HomeSyncRole.Control || role == HomeSyncRole.Recorder;
+
+    // 実験の名前・実験対象者をこのPCで決められるか(録画PCは制御PCから受け取るだけ)
+    public bool CanEditSession => role == HomeSyncRole.Control || role == HomeSyncRole.Single;
+
+    public HomeSyncSettings Clone() => JsonUtility.FromJson<HomeSyncSettings>(JsonUtility.ToJson(this));
 
     private static HomeSyncSettings current;
     private static DateTime currentStamp;
@@ -153,6 +170,11 @@ public static class HomeSharedSession
 
     public static string DataRootDirectory(bool useSharedSession, string inspectorValue) =>
         IsActive(useSharedSession) ? HomeSyncSettings.Current.dataRootDirectory : inspectorValue;
+
+    public static HomeKinectDeviceIndex[] KinectTable(bool useSharedSession, HomeKinectDeviceIndex[] inspectorValue) =>
+        IsActive(useSharedSession) && HomeSyncSettings.Current.kinects != null && HomeSyncSettings.Current.kinects.Length > 0
+            ? HomeSyncSettings.Current.kinects
+            : inspectorValue;
 }
 
 public static class HomeSyncPaths

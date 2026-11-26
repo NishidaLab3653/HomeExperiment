@@ -48,7 +48,7 @@ public class HomeEnvSetup : MonoBehaviour, IHomeExperimentNameProvider, IHomeDat
     [Tooltip("<Data Root Directory>/<実験の名前>/Env/ に保存する。")]
     [HomeExperimentFolder(HomeExperimentFolderAttribute.Kind.Experiment)]
     [SerializeField] private string experimentName = "";
-    [Tooltip("オンにすると、同期(Window > Home Experiment Sync)を使っているPCでは、上の Data Root Directory と実験の名前の代わりに\n" +
+    [Tooltip("オンにすると、コントロールパネル(HomeExperiment > コントロールパネル)を使っているPCでは、上の Data Root Directory と実験の名前の代わりに\n" +
              "同期ウィンドウのデータの場所と、制御PCが配った実験の名前を使う。同期を使っていないPCではインスペクターの値を使う。")]
     [SerializeField] private bool useSharedSession = true;
 
@@ -89,6 +89,15 @@ public class HomeEnvSetup : MonoBehaviour, IHomeExperimentNameProvider, IHomeDat
 
     public string DataRootDirectory => HomeSharedSession.DataRootDirectory(useSharedSession, dataRootDirectory);
 
+    // 同期(コントロールパネル)を使っているPCでは、このPCの設定のキネクトの表と位置合わせの基準を使う
+    private HomeKinectDeviceIndex[] KinectTable => HomeSharedSession.KinectTable(useSharedSession, kinectDeviceIndices);
+
+    private string ReferenceKinectId =>
+        HomeSharedSession.IsActive(useSharedSession) ? HomeSyncSettings.Current.referenceKinectId : referenceKinectId;
+
+    private ReferencePointCloudSource ReferenceSource =>
+        HomeSharedSession.IsActive(useSharedSession) ? HomeSyncSettings.Current.referencePointCloudSource : referencePointCloudSource;
+
     // 保存済みの点群を基準に使っている基準キネクト(使っていなければ null)
     private HomeKinect savedReferenceKinect;
 
@@ -97,7 +106,7 @@ public class HomeEnvSetup : MonoBehaviour, IHomeExperimentNameProvider, IHomeDat
         HomeGpuCheck.LogOnce(nameof(HomeEnvSetup));
 
         // KinectPointCloudOnce はデバイスを Start で開くので、その前に表示/非表示と deviceIndex を反映する
-        HomeKinectDeviceIndex.ApplyToScene(kinectDeviceIndices);
+        HomeKinectDeviceIndex.ApplyToScene(KinectTable);
         PrepareSavedReferencePointCloud();
 
         // 保存済みの点群を使う基準キネクトはデバイスを開かないので重なりの確認から外す
@@ -109,13 +118,13 @@ public class HomeEnvSetup : MonoBehaviour, IHomeExperimentNameProvider, IHomeDat
 
     private void OnValidate()
     {
-        HomeKinectDeviceIndex.ApplyToSceneInEditor(kinectDeviceIndices, this, ref kinectTableLoaded);
+        HomeKinectDeviceIndex.ApplyToSceneInEditor(KinectTable, this, ref kinectTableLoaded);
     }
 #endif
 
     private void PrepareSavedReferencePointCloud()
     {
-        if (referencePointCloudSource != ReferencePointCloudSource.SavedEnvIfExists ||
+        if (ReferenceSource != ReferencePointCloudSource.SavedEnvIfExists ||
             !HomeExperimentPaths.IsValidRootDirectory(DataRootDirectory, out _) ||
             !HomeExperimentPaths.IsValidFolderName(ExperimentName, out _))
             return;
@@ -217,11 +226,11 @@ public class HomeEnvSetup : MonoBehaviour, IHomeExperimentNameProvider, IHomeDat
     {
         foreach (HomeKinect kinect in GetKinects(true))
         {
-            if (kinect.KinectId == referenceKinectId)
+            if (kinect.KinectId == ReferenceKinectId)
                 return kinect;
         }
 
-        Debug.LogWarning($"[HomeEnvSetup] 基準キネクト Kinect{referenceKinectId} がシーンにありません。");
+        Debug.LogWarning($"[HomeEnvSetup] 基準キネクト Kinect{ReferenceKinectId} がシーンにありません。");
         return null;
     }
 
