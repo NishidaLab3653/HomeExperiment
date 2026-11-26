@@ -14,6 +14,9 @@ public class HomeEnvLoader : MonoBehaviour, IHomeExperimentNameProvider
     [Header("Experiment")]
     [HomeExperimentFolder(HomeExperimentFolderAttribute.Kind.Experiment)]
     [SerializeField] private string experimentName = "";
+    [Tooltip("オンにすると、同期(Window > Home Experiment Sync)を使っているPCでは、上の実験の名前の代わりに制御PCが配った実験の名前を使う。\n" +
+             "計測のシーン(1HeadDirRecording / 1HeadDirRecordingMulti)でオンにする。分析のシーンではオフのまま。")]
+    [SerializeField] private bool useSharedSession = false;
 
     [Header("Room Objects")]
     [SerializeField] private bool loadRoomObjects = true;
@@ -24,7 +27,14 @@ public class HomeEnvLoader : MonoBehaviour, IHomeExperimentNameProvider
     [Tooltip("位置姿勢を再現するキネクト。骨格データを再生するだけのシーンでは空でよい。")]
     [SerializeField] private HomeKinect[] kinects;
 
-    public string ExperimentName => experimentName;
+    // プレイ中は Awake で読み込んだ実験の名前を返す(途中で共有セッションの実験の名前が変わっても、読み込んだ Env と食い違わないように)
+    public string ExperimentName => loadedExperimentName ?? HomeSharedSession.ExperimentName(useSharedSession, experimentName);
+
+    // 共有セッションの実験の名前が、読み込んだ Env と違うものに変わったか(プレイし直す必要がある)
+    public bool ExperimentChangedSinceLoad =>
+        loadedExperimentName != null && HomeSharedSession.ExperimentName(useSharedSession, experimentName) != loadedExperimentName;
+
+    private string loadedExperimentName;
 
     public bool IsLoaded { get; private set; }
 
@@ -37,6 +47,8 @@ public class HomeEnvLoader : MonoBehaviour, IHomeExperimentNameProvider
     private void Awake()
     {
         string rootDirectory = HomeExperimentPaths.GetDataRootDirectory(this);
+        string experimentName = HomeSharedSession.ExperimentName(useSharedSession, this.experimentName);
+        loadedExperimentName = experimentName;
 
         if (!HomeExperimentPaths.IsValidRootDirectory(rootDirectory, out string error))
         {

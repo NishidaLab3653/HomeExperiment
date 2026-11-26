@@ -26,6 +26,10 @@ public class HomeSkeletonRecordingController : MonoBehaviour, IHomeDataRootProvi
     [Header("Subject")]
     [HomeExperimentFolder(HomeExperimentFolderAttribute.Kind.Subject)]
     [SerializeField] private string subjectName = "";
+    [Tooltip("オンにすると、同期(Window > Home Experiment Sync)を使っているPCでは、上の Data Root Directory と実験対象者の代わりに\n" +
+             "同期ウィンドウのデータの場所と、制御PCが配った実験対象者を使う(実験の名前は HomeEnvLoader が同じように受け取る)。\n" +
+             "同期を使っていないPCではインスペクターの値を使う。")]
+    [SerializeField] private bool useSharedSession = true;
 
     [Header("Recorders")]
     [Tooltip("空の場合はシーン内の表示中の HomeSkeletonRecorder を自動で集める。")]
@@ -65,7 +69,12 @@ public class HomeSkeletonRecordingController : MonoBehaviour, IHomeDataRootProvi
 
     private HomeEnvLoader env;
 
-    public string DataRootDirectory => dataRootDirectory;
+    public string DataRootDirectory => HomeSharedSession.DataRootDirectory(useSharedSession, dataRootDirectory);
+
+    // 記録中は記録を始めたときの実験対象者(途中で制御PCが実験対象者を変えても、保存先は変わらない)
+    public string SubjectName => isRecording ? recordingSubjectName : HomeSharedSession.SubjectName(useSharedSession, subjectName);
+
+    private string recordingSubjectName;
     private readonly List<HomeSkeletonRecorder> activeRecorders = new List<HomeSkeletonRecorder>();
     private bool isRecording;
     private double recordingStartClock;
@@ -142,6 +151,14 @@ public class HomeSkeletonRecordingController : MonoBehaviour, IHomeDataRootProvi
         if (isRecording)
             return;
 
+        if (env.ExperimentChangedSinceLoad)
+        {
+            SetMessage($"制御PCで実験の名前が {HomeSession.Current.experimentName} に変わりました。プレイし直してから記録してください(今読み込んでいる Env は {env.ExperimentName})。", true);
+            return;
+        }
+
+        string subjectName = SubjectName;
+
         if (!HomeExperimentPaths.IsValidFolderName(env.ExperimentName, out string error))
         {
             SetMessage($"実験の名前を正しく入力してください。{error}", true);
@@ -154,7 +171,7 @@ public class HomeSkeletonRecordingController : MonoBehaviour, IHomeDataRootProvi
             return;
         }
 
-        if (!HomeExperimentPaths.IsValidRootDirectory(dataRootDirectory, out error))
+        if (!HomeExperimentPaths.IsValidRootDirectory(DataRootDirectory, out error))
         {
             SetMessage($"保存先を正しく指定してください。{error}", true);
             return;
@@ -197,7 +214,7 @@ public class HomeSkeletonRecordingController : MonoBehaviour, IHomeDataRootProvi
         recordingStartClock = HomeSkeletonRecorder.ClockSeconds;
         recordingStartedAt = System.DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff");
 
-        string rawDir = HomeExperimentPaths.GetRawDirectory(dataRootDirectory, env.ExperimentName, subjectName);
+        string rawDir = HomeExperimentPaths.GetRawDirectory(DataRootDirectory, env.ExperimentName, subjectName);
         bool anyRaw = activeRecorders.Exists(r => r.recordRawMkv);
 
         if (anyRaw)
@@ -215,6 +232,7 @@ public class HomeSkeletonRecordingController : MonoBehaviour, IHomeDataRootProvi
             recorder.BeginRecording(recordingStartClock, anyRaw ? rawDir : null, rawInfo);
         }
 
+        recordingSubjectName = subjectName;
         isRecording = true;
         SetMessage($"記録開始: {env.ExperimentName} / {subjectName} (キネクト {activeRecorders.Count} 台)", false);
     }
@@ -224,9 +242,10 @@ public class HomeSkeletonRecordingController : MonoBehaviour, IHomeDataRootProvi
         if (!isRecording)
             return;
 
+        string subjectName = recordingSubjectName;
         isRecording = false;
 
-        string subjectDir = HomeExperimentPaths.GetSubjectDirectory(dataRootDirectory, env.ExperimentName, subjectName);
+        string subjectDir = HomeExperimentPaths.GetSubjectDirectory(DataRootDirectory, env.ExperimentName, subjectName);
         Directory.CreateDirectory(subjectDir);
 
         string backupSuffix = System.DateTime.Now.ToString("yyyyMMdd_HHmmss");
@@ -244,7 +263,7 @@ public class HomeSkeletonRecordingController : MonoBehaviour, IHomeDataRootProvi
                 continue;
             }
 
-            string path = HomeExperimentPaths.GetSkeletonPath(dataRootDirectory, env.ExperimentName, subjectName, recorder.KinectId);
+            string path = HomeExperimentPaths.GetSkeletonPath(DataRootDirectory, env.ExperimentName, subjectName, recorder.KinectId);
 
             // 同じ実験対象者で撮り直した場合、前のデータは上書きせず名前を変えて残す
             if (File.Exists(path))
@@ -340,7 +359,11 @@ public class HomeSkeletonRecordingController : MonoBehaviour, IHomeDataRootProvi
             statusStyle = new GUIStyle(GUI.skin.box) { alignment = TextAnchor.UpperLeft, fontSize = 16, wordWrap = true };
 
         StringBuilder text = new StringBuilder();
-        text.AppendLine($"実験: {env.ExperimentName}   実験対象者: {subjectName}");
+        text.AppendLine($"実験: {env.ExperimentName}   実験対象者: {SubjectName}" +
+                        (HomeSharedSession.IsActive(useSharedSession) ? "   (制御PCの値)" : ""));
+
+        if (env.ExperimentChangedSinceLoad)
+            text.AppendLine($"制御PCで実験の名前が {HomeSession.Current.experimentName} に変わりました。プレイし直してください。");
 
         if (isRecording)
             text.AppendLine($"● 記録中 {HomeSkeletonRecorder.ClockSeconds - recordingStartClock:F1}s   [{toggleKey}]で終了");

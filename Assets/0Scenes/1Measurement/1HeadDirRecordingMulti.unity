@@ -296,6 +296,7 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   experimentName: gomi
+  useSharedSession: 1
   loadRoomObjects: 1
   roomObjectParent: {fileID: 1217085267}
   kinects:

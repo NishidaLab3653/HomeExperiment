@@ -48,6 +48,9 @@ public class HomeEnvSetup : MonoBehaviour, IHomeExperimentNameProvider, IHomeDat
     [Tooltip("<Data Root Directory>/<実験の名前>/Env/ に保存する。")]
     [HomeExperimentFolder(HomeExperimentFolderAttribute.Kind.Experiment)]
     [SerializeField] private string experimentName = "";
+    [Tooltip("オンにすると、同期(Window > Home Experiment Sync)を使っているPCでは、上の Data Root Directory と実験の名前の代わりに\n" +
+             "同期ウィンドウのデータの場所と、制御PCが配った実験の名前を使う。同期を使っていないPCではインスペクターの値を使う。")]
+    [SerializeField] private bool useSharedSession = true;
 
     [Header("Targets")]
     [Tooltip("保存する部屋オブジェクトの親。この配下で表示中かつメッシュを持つオブジェクトを保存する。")]
@@ -81,9 +84,10 @@ public class HomeEnvSetup : MonoBehaviour, IHomeExperimentNameProvider, IHomeDat
     [Header("Input")]
     [SerializeField] private KeyCode saveKey = KeyCode.Space;
 
-    public string ExperimentName => experimentName;
+    // 同期を使っているPCでは、共有セッションの実験の名前と、同期ウィンドウのデータの場所を使う
+    public string ExperimentName => HomeSharedSession.ExperimentName(useSharedSession, experimentName);
 
-    public string DataRootDirectory => dataRootDirectory;
+    public string DataRootDirectory => HomeSharedSession.DataRootDirectory(useSharedSession, dataRootDirectory);
 
     // 保存済みの点群を基準に使っている基準キネクト(使っていなければ null)
     private HomeKinect savedReferenceKinect;
@@ -112,8 +116,8 @@ public class HomeEnvSetup : MonoBehaviour, IHomeExperimentNameProvider, IHomeDat
     private void PrepareSavedReferencePointCloud()
     {
         if (referencePointCloudSource != ReferencePointCloudSource.SavedEnvIfExists ||
-            !HomeExperimentPaths.IsValidRootDirectory(dataRootDirectory, out _) ||
-            !HomeExperimentPaths.IsValidFolderName(experimentName, out _))
+            !HomeExperimentPaths.IsValidRootDirectory(DataRootDirectory, out _) ||
+            !HomeExperimentPaths.IsValidFolderName(ExperimentName, out _))
             return;
 
         HomeKinect reference = FindReferenceKinect();
@@ -121,7 +125,7 @@ public class HomeEnvSetup : MonoBehaviour, IHomeExperimentNameProvider, IHomeDat
         if (reference == null)
             return;
 
-        string path = HomeExperimentPaths.GetKinectPointCloudPath(dataRootDirectory, experimentName, reference.KinectId);
+        string path = HomeExperimentPaths.GetKinectPointCloudPath(DataRootDirectory, ExperimentName, reference.KinectId);
 
         if (!File.Exists(path))
         {
@@ -149,13 +153,13 @@ public class HomeEnvSetup : MonoBehaviour, IHomeExperimentNameProvider, IHomeDat
         if (initialKinectPose == InitialKinectPose.None)
             return;
 
-        bool hasExperimentName = HomeExperimentPaths.IsValidRootDirectory(dataRootDirectory, out _) &&
-                                 HomeExperimentPaths.IsValidFolderName(experimentName, out _);
+        bool hasExperimentName = HomeExperimentPaths.IsValidRootDirectory(DataRootDirectory, out _) &&
+                                 HomeExperimentPaths.IsValidFolderName(ExperimentName, out _);
 
         foreach (HomeKinect kinect in GetKinects(true))
         {
             if (hasExperimentName &&
-                kinect.TryLoadPose(HomeExperimentPaths.GetKinectTransformPath(dataRootDirectory, experimentName, kinect.KinectId)))
+                kinect.TryLoadPose(HomeExperimentPaths.GetKinectTransformPath(DataRootDirectory, ExperimentName, kinect.KinectId)))
                 continue;
 
             if (initialKinectPose == InitialKinectPose.EnvThenLegacyCalibration)
@@ -172,13 +176,13 @@ public class HomeEnvSetup : MonoBehaviour, IHomeExperimentNameProvider, IHomeDat
     // 基準キネクト本体が非表示(このマシンにつないでいない)でも表示できるよう、キネクトの子ではなく別のオブジェクトにする。
     private void ShowSavedReferencePointCloud(HomeKinect reference)
     {
-        string path = HomeExperimentPaths.GetKinectPointCloudPath(dataRootDirectory, experimentName, reference.KinectId);
+        string path = HomeExperimentPaths.GetKinectPointCloudPath(DataRootDirectory, ExperimentName, reference.KinectId);
 
         if (!HomePointCloudIO.TryLoad(path, out List<Vector3> points))
             return;
 
         // 点群はキネクトのローカル座標なので、一緒に保存した位置姿勢に合わせる
-        if (!reference.TryLoadPose(HomeExperimentPaths.GetKinectTransformPath(dataRootDirectory, experimentName, reference.KinectId)))
+        if (!reference.TryLoadPose(HomeExperimentPaths.GetKinectTransformPath(DataRootDirectory, ExperimentName, reference.KinectId)))
             Debug.LogWarning($"[HomeEnvSetup] Kinect{reference.KinectId} の位置姿勢ファイルが無いため、シーン上の配置に点群を置きます。");
 
         GameObject cloud = new GameObject($"Kinect{reference.KinectId}_SavedPointCloud");
@@ -242,20 +246,20 @@ public class HomeEnvSetup : MonoBehaviour, IHomeExperimentNameProvider, IHomeDat
     [ContextMenu("Save Env")]
     public void Save()
     {
-        if (!HomeExperimentPaths.IsValidRootDirectory(dataRootDirectory, out string error))
+        if (!HomeExperimentPaths.IsValidRootDirectory(DataRootDirectory, out string error))
         {
             Debug.LogError($"[HomeEnvSetup] データのフォルダを正しく指定してください。{error}");
             return;
         }
 
-        if (!HomeExperimentPaths.IsValidFolderName(experimentName, out error))
+        if (!HomeExperimentPaths.IsValidFolderName(ExperimentName, out error))
         {
             Debug.LogError($"[HomeEnvSetup] 実験の名前を正しく入力してください。{error}");
             return;
         }
 
 #if UNITY_EDITOR
-        string envDir = HomeExperimentPaths.GetEnvDirectory(dataRootDirectory, experimentName);
+        string envDir = HomeExperimentPaths.GetEnvDirectory(DataRootDirectory, ExperimentName);
         Directory.CreateDirectory(envDir);
 
         int kinectCount = 0;
@@ -275,11 +279,11 @@ public class HomeEnvSetup : MonoBehaviour, IHomeExperimentNameProvider, IHomeDat
             int deviceIndex = pointCloud != null ? pointCloud.deviceIndex : -1;
             string serialNumber = deviceIndex >= 0 ? TryReadSerialNumber(deviceIndex) : null;
 
-            kinect.SavePose(HomeExperimentPaths.GetKinectTransformPath(dataRootDirectory, experimentName, kinect.KinectId), serialNumber, deviceIndex);
+            kinect.SavePose(HomeExperimentPaths.GetKinectTransformPath(DataRootDirectory, ExperimentName, kinect.KinectId), serialNumber, deviceIndex);
             kinectCount++;
 
             if (savePointClouds &&
-                SavePointCloud(kinect, pointCloud, HomeExperimentPaths.GetKinectPointCloudPath(dataRootDirectory, experimentName, kinect.KinectId)))
+                SavePointCloud(kinect, pointCloud, HomeExperimentPaths.GetKinectPointCloudPath(DataRootDirectory, ExperimentName, kinect.KinectId)))
                 pointCloudCount++;
         }
 
@@ -297,12 +301,17 @@ public class HomeEnvSetup : MonoBehaviour, IHomeExperimentNameProvider, IHomeDat
         int roomObjectCount = 0;
         int targetObjectCount = 0;
 
-        if (!saveRoomObjects)
+        // 同期を使っているとき、部屋オブジェクト・対象物体は制御PCだけが保存する(録画PCが古い部屋で上書きして全PCに配らないように)
+        bool isSyncRecorder = HomeSharedSession.IsActive(useSharedSession) && HomeSyncSettings.Current.role == HomeSyncRole.Recorder;
+
+        if (isSyncRecorder)
+            Debug.Log("[HomeEnvSetup] このPCは同期の録画PCなので、部屋オブジェクト・対象物体は保存しません(制御PCで保存したものを受け取ります)。");
+        else if (!saveRoomObjects)
             Debug.Log("[HomeEnvSetup] Save Room Objects がオフのため、部屋オブジェクト・対象物体は保存しません(Envの既存ファイルはそのまま)。");
         else if (roots.Count == 0)
             Debug.LogWarning("[HomeEnvSetup] roomRoots が設定されていないため、部屋オブジェクトは保存しません。");
         else
-            roomObjectCount = HomeRoomObjectIO.Save(dataRootDirectory, experimentName, roots, out targetObjectCount);
+            roomObjectCount = HomeRoomObjectIO.Save(DataRootDirectory, ExperimentName, roots, out targetObjectCount);
 
         HomeExperimentPaths.RefreshAssetDatabase();
 
