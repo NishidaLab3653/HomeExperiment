@@ -1,0 +1,42 @@
+# Unity
+[Ll]ibrary/
+[Tt]emp/
+[Ll]ogs/
+UserSettings/
+
+# IDE
+.vs/
+.vscode/
+*.csproj
+*.sln
+
+# Data (家庭用実験の Env だけ複数マシンで共有する。Skeleton / Raw~ などの記録データは含めない)
+Assets/Data/**
+!Assets/Data/**/
+!Assets/Data/HomeExperiment.meta
+!Assets/Data/HomeExperiment/*.meta
+!Assets/Data/HomeExperiment/*/Env.meta
+!Assets/Data/HomeExperiment/*/Env/**
+
+# Kinect / ONNX
+Assets/Plugins/
+Packages/Microsoft.Azure.Kinect*
+*.onnx
+*.dll
+*.nupkg
+
+# Build
+Build/
+Builds/
+
+Assets/NotoSansJP-Regular SDF.asset
+
+Recordings/
+obj/
+.vsconfig
+Assets/joint_positions.json
+*.config
+
+# Python
+__pycache__/
+*.pyc

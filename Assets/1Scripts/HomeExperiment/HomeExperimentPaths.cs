@@ -1,0 +1,415 @@
+using System.IO;
+using UnityEngine;
+using UnityEngine.EventSystems;
+
+// 家庭での頭部方向計測実験(4HomeExperiment)で使うディレクトリ構成をまとめたクラス。
+//
+// Assets/Data/HomeExperiment/   … インスペクターの Data Root Directory で別のフォルダ(例: D:\HomeExperiment)にできる(Env/ も Skeleton/ も)
+//   └ <実験の名前>/
+//       ├ Env/
+//       │   ├ KinectA_Transform.json  … キネクトの位置姿勢(1台1ファイル)
+//       │   ├ KinectA_PointCloud.ply  … シーン0で撮った点群(1台1ファイル, キネクトのローカル座標, メートル)
+//       │   ├ RoomObjects.json        … 部屋オブジェクトの一覧とTransform
+//       │   ├ TargetObjects.json      … 注視などの対象物体(シーン0で部屋オブジェクトの下に置いた物体)の一覧とTransform
+//       │   └ Meshes/                 … アセットを参照できない部屋オブジェクト/対象物体のメッシュ
+//       └ Skeleton/
+//           └ <実験対象者>/
+//               ├ A_skeleton.json     … キネクト1台ごとの骨格データ
+//               ├ Raw~/                  … シーン1 で Record Raw Mkv にチェックを入れて記録した生データ(Unityは「~」で終わるフォルダを読み込まない)
+//               │   ├ A.mkv              … キネクト1台ごとのカラー(MJPG)・深度・赤外線(Azure Kinect 公式の録画形式)
+//               │   ├ A_raw_index.json   … フレームごとの時刻(全キネクト共通の時計)・キネクトの位置姿勢・シリアル番号
+//               │   └ A_calibration.json … キネクトの校正情報(カメラの内部パラメータ・深度→カラーの外部パラメータ)
+//               ├ Filtered/
+//               │   ├ filtered_AllJoints.json  … 全キネクトを統合した骨格(シーン3, 全関節の信頼度で選択。人物IDはまとめる前)
+//               │   ├ filtered_HeadJoints.json … 全キネクトを統合した骨格(シーン3, 頭部の関節の信頼度で選択。人物IDはまとめる前)
+//               │   ├ filtered_Image.json      … 画像から推定した骨格(Tools/GazePipeline。人物IDはまとめる前)
+//               │   ├ grouped_<Mode>.json      … 人物ごとの骨格(シーン3でグループごとに1つに絞ったもの。シーン4/5はこれを読む)
+//               │   └ grouped_<Mode>_<名前>.json … 頭の向きを平滑化した人物ごとの骨格(Tools/GazeSmooth/smooth_skeleton.py。
+//               │                                 シーン4/5の Skeleton Variant で <名前> を選ぶと読む)
+//               └ Analysis/
+//                   ├ Groups/
+//                   │   └ person_groups_<人物IDの元の骨格>.json … 同じ人の人物IDをまとめたグループ(シーン3で作る・使う)
+//                   ├ HeatMap/
+//                   │   └ heatmap_<骨格>.json … 視線コーンのヒートマップ(シーン4, 部屋メッシュの頂点ごとのヒート)
+//                   ├ Score/
+//                   │   └ score_<骨格>.json   … 対象物体ごとのスコアとフレームごとの注視対象(シーン4)
+//                   ├ Export/
+//                   │   └ <骨格>/                            … Python で解析する用の書き出し(シーン5 5GazeExport)
+//                   │       ├ <人物>_gaze.csv              … フレームごとの注視対象(対象物体だけ)
+//                   │       ├ <人物>_gaze_persons.csv      … フレームごとの注視対象(相手の人物も含める。人物が2人以上のときだけ)
+//                   │       ├ <人物>_distance.csv          … フレームごとの対象物体・相手までの水平距離
+//                   │       └ export_params.json           … 書き出しに使った設定
+//                   ├ Interaction/
+//                   │   ├ interaction_<骨格>.json          … 人物どうし・対象物体の相互作用の解析(旧シーン5, Backnumber/5InteractionAnalyze)
+//                   │   ├ interaction_<骨格>_summary.csv   … 同じ集計を表にしたもの(Excel などで開く)
+//                   │   └ interaction_<骨格>_episodes.csv  … 1回1回の出来事(注視・相互注視など)の開始・終了時刻
+//                   ├ GazeBehavior/
+//                   │   ├ gaze_behavior_<骨格>_hypotheses_results.csv    … 4つの仮説の結果(シーン6)
+//                   │   ├ gaze_behavior_<骨格>_hypotheses_approaches.csv … 子供の接近1回ごとの、親・物が視野に入っていた割合(シーン6)
+//                   │   ├ gaze_behavior_<骨格>_hypotheses_frames.csv     … 子供のフレームごとの位置・向き・視野(シーン6)
+//                   │   ├ gaze_behavior_<骨格>_hypotheses_params.json    … 解析に使った定義(シーン6)
+//                   │   └ hypotheses_kinect_vs_image.html              … キネクトと画像の骨格での仮説の比較(Tools/GazeBehavior/compare_hypotheses.py)
+//                   │   (gaze_behavior_<骨格>_frames.csv などは、書き換える前のシーン6の探索用の出力。Tools/GazeBehavior の他のスクリプトが読む)
+//                   └ Figures/
+//                       └ gaze_timeline.html … 2人の注視の時系列グラフ(Tools/GazeTimeline/make_gaze_timeline.py で Interaction/ から作る)
+//                   (<骨格> は filtered_HeadJoints / KinectA など、解析に使った骨格データ)
+//                   以前は Analysis/ の直下に置いていた。シーン4/5を開くと MigrateLegacyAnalysisFiles で上のフォルダへ移す。
+public static class HomeExperimentPaths
+{
+    public const string EnvFolderName = "Env";
+    public const string SkeletonFolderName = "Skeleton";
+    public const string MeshFolderName = "Meshes";
+    public const string RoomObjectsFileName = "RoomObjects.json";
+    public const string TargetObjectsFileName = "TargetObjects.json";
+    public const string SkeletonFileSuffix = "_skeleton.json";
+    public const string FilteredFolderName = "Filtered";
+    public const string AnalysisFolderName = "Analysis";
+    public const string GroupsFolderName = "Groups";
+    public const string HeatMapFolderName = "HeatMap";
+    public const string ScoreFolderName = "Score";
+    public const string InteractionFolderName = "Interaction";
+    public const string GazeBehaviorFolderName = "GazeBehavior";
+    public const string ExportFolderName = "Export";
+
+    public const string PersonGroupsFilePrefix = "person_groups_";
+    public const string HeatMapFilePrefix = "heatmap_";
+    public const string ScoreFilePrefix = "score_";
+    public const string InteractionFilePrefix = "interaction_";
+    public const string GazeBehaviorFilePrefix = "gaze_behavior_";
+    public const string RawFolderName = "Raw~";
+
+    public static string RootDirectory =>
+        Path.Combine(Application.dataPath, "Data", "HomeExperiment");
+
+    // rootDirectory が空なら既定の RootDirectory(Assets/Data/HomeExperiment)を使う
+    public static string ResolveRootDirectory(string rootDirectory) =>
+        string.IsNullOrWhiteSpace(rootDirectory) ? RootDirectory : rootDirectory.Trim();
+
+    // データの保存先(読み込み元)として使えるフォルダか(空なら既定。指定するなら絶対パスで、ドライブが存在すること)
+    public static bool IsValidRootDirectory(string rootDirectory, out string error)
+    {
+        error = null;
+
+        if (string.IsNullOrWhiteSpace(rootDirectory))
+            return true;
+
+        string root = rootDirectory.Trim();
+
+        try
+        {
+            if (!Path.IsPathRooted(root))
+            {
+                error = $"保存先は絶対パスで指定してください(例: D:\\HomeExperiment): {root}";
+                return false;
+            }
+
+            if (!Directory.Exists(Path.GetPathRoot(root)))
+            {
+                error = $"保存先のドライブが見つかりません: {root}";
+                return false;
+            }
+        }
+        catch (System.ArgumentException)
+        {
+            error = $"保存先のパスに使えない文字が含まれています: {root}";
+            return false;
+        }
+
+        return true;
+    }
+
+    // 同じGameObjectの IHomeDataRootProvider(シーンごとのコンポーネント)からデータのルートを取る。無ければ null(= 既定)
+    public static string GetDataRootDirectory(Component component)
+    {
+        IHomeDataRootProvider provider = component != null ? component.GetComponent<IHomeDataRootProvider>() : null;
+        return provider != null ? provider.DataRootDirectory : null;
+    }
+
+    // ここから下のパスはすべて rootDirectory を最初に受け取る。空なら既定の RootDirectory(Assets/Data/HomeExperiment)。
+    public static string GetExperimentDirectory(string rootDirectory, string experimentName) =>
+        Path.Combine(ResolveRootDirectory(rootDirectory), experimentName.Trim());
+
+    public static string GetEnvDirectory(string rootDirectory, string experimentName) =>
+        Path.Combine(GetExperimentDirectory(rootDirectory, experimentName), EnvFolderName);
+
+    public static string GetMeshDirectory(string rootDirectory, string experimentName) =>
+        Path.Combine(GetEnvDirectory(rootDirectory, experimentName), MeshFolderName);
+
+    public static string GetRoomObjectsPath(string rootDirectory, string experimentName) =>
+        Path.Combine(GetEnvDirectory(rootDirectory, experimentName), RoomObjectsFileName);
+
+    public static string GetTargetObjectsPath(string rootDirectory, string experimentName) =>
+        Path.Combine(GetEnvDirectory(rootDirectory, experimentName), TargetObjectsFileName);
+
+    public static string GetKinectTransformPath(string rootDirectory, string experimentName, string kinectId) =>
+        Path.Combine(GetEnvDirectory(rootDirectory, experimentName), $"Kinect{kinectId}_Transform.json");
+
+    public static string GetKinectPointCloudPath(string rootDirectory, string experimentName, string kinectId) =>
+        Path.Combine(GetEnvDirectory(rootDirectory, experimentName), $"Kinect{kinectId}_PointCloud.ply");
+
+    public static string GetSkeletonRootDirectory(string rootDirectory, string experimentName) =>
+        Path.Combine(GetExperimentDirectory(rootDirectory, experimentName), SkeletonFolderName);
+
+    public static string GetSubjectDirectory(string rootDirectory, string experimentName, string subjectName) =>
+        Path.Combine(GetSkeletonRootDirectory(rootDirectory, experimentName), subjectName.Trim());
+
+    public static string GetSkeletonPath(string rootDirectory, string experimentName, string subjectName, string kinectId) =>
+        Path.Combine(GetSubjectDirectory(rootDirectory, experimentName, subjectName), kinectId + SkeletonFileSuffix);
+
+    public static string GetFilteredDirectory(string rootDirectory, string experimentName, string subjectName) =>
+        Path.Combine(GetSubjectDirectory(rootDirectory, experimentName, subjectName), FilteredFolderName);
+
+    public static string GetFilteredSkeletonPath(string rootDirectory, string experimentName, string subjectName, string modeName) =>
+        Path.Combine(GetFilteredDirectory(rootDirectory, experimentName, subjectName), $"filtered_{modeName}.json");
+
+    // 人物ごとの骨格。variant が空ならシーン3でグループごとに1つに絞った grouped_<Mode>.json(シーン4/5が読む)、
+    // 空でなければ頭の向きを平滑化した grouped_<Mode>_<variant>.json(Tools/GazeSmooth/smooth_skeleton.py)
+    public static string GetGroupedSkeletonPath(string rootDirectory, string experimentName, string subjectName, string modeName, string variant = null) =>
+        Path.Combine(GetFilteredDirectory(rootDirectory, experimentName, subjectName),
+            string.IsNullOrWhiteSpace(variant) ? $"grouped_{modeName}.json" : $"grouped_{modeName}_{variant.Trim()}.json");
+
+    // Filtered/ にある grouped_<Mode>_<名前>.json の <名前> の一覧
+    public static string[] GetGroupedSkeletonVariants(string rootDirectory, string experimentName, string subjectName, string modeName)
+    {
+        string directory = GetFilteredDirectory(rootDirectory, experimentName, subjectName);
+
+        if (!Directory.Exists(directory))
+            return new string[0];
+
+        string prefix = $"grouped_{modeName}_";
+        string[] files = Directory.GetFiles(directory, prefix + "*.json");
+
+        for (int i = 0; i < files.Length; i++)
+            files[i] = Path.GetFileNameWithoutExtension(files[i]).Substring(prefix.Length);
+
+        System.Array.Sort(files);
+        return files;
+    }
+
+    public static string GetRawDirectory(string rootDirectory, string experimentName, string subjectName) =>
+        Path.Combine(GetSubjectDirectory(rootDirectory, experimentName, subjectName), RawFolderName);
+
+    public static string GetAnalysisDirectory(string rootDirectory, string experimentName, string subjectName) =>
+        Path.Combine(GetSubjectDirectory(rootDirectory, experimentName, subjectName), AnalysisFolderName);
+
+    public static string GetGroupsDirectory(string rootDirectory, string experimentName, string subjectName) =>
+        Path.Combine(GetAnalysisDirectory(rootDirectory, experimentName, subjectName), GroupsFolderName);
+
+    public static string GetHeatMapDirectory(string rootDirectory, string experimentName, string subjectName) =>
+        Path.Combine(GetAnalysisDirectory(rootDirectory, experimentName, subjectName), HeatMapFolderName);
+
+    public static string GetScoreDirectory(string rootDirectory, string experimentName, string subjectName) =>
+        Path.Combine(GetAnalysisDirectory(rootDirectory, experimentName, subjectName), ScoreFolderName);
+
+    public static string GetInteractionDirectory(string rootDirectory, string experimentName, string subjectName) =>
+        Path.Combine(GetAnalysisDirectory(rootDirectory, experimentName, subjectName), InteractionFolderName);
+
+    // シーン3で同じ人の人物IDをまとめたグループ(人物IDは骨格データごとに違うので、骨格データごとに持つ)
+    public static string GetPersonGroupsPath(string rootDirectory, string experimentName, string subjectName, string personIdSource) =>
+        Path.Combine(GetGroupsDirectory(rootDirectory, experimentName, subjectName), $"{PersonGroupsFilePrefix}{personIdSource}.json");
+
+    public static string GetGazeHeatMapPath(string rootDirectory, string experimentName, string subjectName, string sourceName) =>
+        Path.Combine(GetHeatMapDirectory(rootDirectory, experimentName, subjectName), $"{HeatMapFilePrefix}{sourceName}.json");
+
+    public static string GetGazeScorePath(string rootDirectory, string experimentName, string subjectName, string sourceName) =>
+        Path.Combine(GetScoreDirectory(rootDirectory, experimentName, subjectName), $"{ScoreFilePrefix}{sourceName}.json");
+
+    // シーン5の相互作用の解析(JSON と、同じ内容の CSV 2つ)
+    public static string GetInteractionPath(string rootDirectory, string experimentName, string subjectName, string sourceName) =>
+        Path.Combine(GetInteractionDirectory(rootDirectory, experimentName, subjectName), $"{InteractionFilePrefix}{sourceName}.json");
+
+    public static string GetInteractionSummaryCsvPath(string rootDirectory, string experimentName, string subjectName, string sourceName) =>
+        Path.Combine(GetInteractionDirectory(rootDirectory, experimentName, subjectName), $"{InteractionFilePrefix}{sourceName}_summary.csv");
+
+    public static string GetInteractionEpisodesCsvPath(string rootDirectory, string experimentName, string subjectName, string sourceName) =>
+        Path.Combine(GetInteractionDirectory(rootDirectory, experimentName, subjectName), $"{InteractionFilePrefix}{sourceName}_episodes.csv");
+
+    // シーン6の視線と行動の解析(fileKind: frames.csv / approaches.csv / summary.csv / params.json)
+    public static string GetGazeBehaviorDirectory(string rootDirectory, string experimentName, string subjectName) =>
+        Path.Combine(GetAnalysisDirectory(rootDirectory, experimentName, subjectName), GazeBehaviorFolderName);
+
+    public static string GetGazeBehaviorPath(string rootDirectory, string experimentName, string subjectName, string sourceName, string fileKind) =>
+        Path.Combine(GetGazeBehaviorDirectory(rootDirectory, experimentName, subjectName), $"{GazeBehaviorFilePrefix}{sourceName}_{fileKind}");
+
+    // シーン5の書き出し(Python で解析する用。<骨格> ごとのフォルダに、人物ごとの CSV)
+    public static string GetExportDirectory(string rootDirectory, string experimentName, string subjectName, string sourceName) =>
+        Path.Combine(GetAnalysisDirectory(rootDirectory, experimentName, subjectName), ExportFolderName, sourceName);
+
+    // 以前 Analysis/ の直下に置いていたファイルを、種類ごとのフォルダ(Groups / HeatMap / Score / Interaction)へ移す。
+    // Unity の .meta も一緒に移す。移す先に同じ名前のファイルがあれば、更新日時の新しい方だけを残す(解析結果は古い版を残さない)。
+    public static void MigrateLegacyAnalysisFiles(string rootDirectory, string experimentName, string subjectName)
+    {
+        if (!IsValidRootDirectory(rootDirectory, out _) ||
+            !IsValidFolderName(experimentName, out _) || !IsValidFolderName(subjectName, out _))
+            return;
+
+        string analysisDir = GetAnalysisDirectory(rootDirectory, experimentName, subjectName);
+
+        if (!Directory.Exists(analysisDir))
+            return;
+
+        bool moved = false;
+
+        foreach (string file in Directory.GetFiles(analysisDir))
+        {
+            string name = Path.GetFileName(file);
+
+            if (name.EndsWith(".meta"))
+                continue;
+
+            string folder =
+                name.StartsWith(PersonGroupsFilePrefix) ? GroupsFolderName :
+                name.StartsWith(HeatMapFilePrefix) ? HeatMapFolderName :
+                name.StartsWith(ScoreFilePrefix) ? ScoreFolderName :
+                name.StartsWith(InteractionFilePrefix) ? InteractionFolderName :
+                null;
+
+            if (folder == null)
+                continue;
+
+            string destination = Path.Combine(analysisDir, folder, name);
+
+            try
+            {
+                // 解析結果は古い版を残さない。移す先に同じ名前があれば、新しい方だけを残す
+                if (File.Exists(destination))
+                {
+                    if (File.GetLastWriteTime(file) <= File.GetLastWriteTime(destination))
+                    {
+                        File.Delete(file);
+                        DeleteIfExists(file + ".meta");
+                        moved = true;
+                        Debug.Log($"[HomeExperimentPaths] {folder}/ の方が新しいので、古い Analysis/{name} を削除しました。");
+                        continue;
+                    }
+
+                    File.Delete(destination);
+                    DeleteIfExists(destination + ".meta");
+                }
+
+                Directory.CreateDirectory(Path.GetDirectoryName(destination));
+                File.Move(file, destination);
+
+                if (File.Exists(file + ".meta"))
+                    File.Move(file + ".meta", destination + ".meta");
+
+                moved = true;
+                Debug.Log($"[HomeExperimentPaths] Analysis/{name} を Analysis/{folder}/ へ移しました。");
+            }
+            catch (System.Exception e)
+            {
+                Debug.LogError($"[HomeExperimentPaths] 移せませんでした: {file}\n{e.Message}");
+            }
+        }
+
+        if (moved)
+            RefreshAssetDatabase();
+    }
+
+    private static void DeleteIfExists(string path)
+    {
+        if (File.Exists(path))
+            File.Delete(path);
+    }
+
+    // フォルダ名として使える名前か(空でなく、パス区切りやWindowsの禁止文字を含まない)。
+    public static bool IsValidFolderName(string name, out string error)
+    {
+        if (string.IsNullOrWhiteSpace(name))
+        {
+            error = "名前が空です。";
+            return false;
+        }
+
+        if (name.Trim().IndexOfAny(Path.GetInvalidFileNameChars()) >= 0)
+        {
+            error = $"フォルダ名に使えない文字が含まれています: {name}";
+            return false;
+        }
+
+        error = null;
+        return true;
+    }
+
+    public static string[] GetChildDirectoryNames(string directory)
+    {
+        if (!Directory.Exists(directory))
+            return new string[0];
+
+        string[] dirs = Directory.GetDirectories(directory);
+
+        for (int i = 0; i < dirs.Length; i++)
+            dirs[i] = Path.GetFileName(dirs[i]);
+
+        System.Array.Sort(dirs);
+        return dirs;
+    }
+
+#if UNITY_EDITOR
+    // Assets配下に書き出したファイルをProjectウィンドウに反映する。
+    public static void RefreshAssetDatabase()
+    {
+        UnityEditor.AssetDatabase.Refresh();
+    }
+#else
+    public static void RefreshAssetDatabase() { }
+#endif
+
+    // UIボタンをクリックすると選択状態が残り、Spaceキーが「Submit」としてそのボタンを
+    // もう一度押してしまう(例: ICPボタンが再実行される)。Spaceキーを合図に使うシーンでは
+    // 毎フレームこれを呼んで選択を外しておく。
+    public static void ClearUISelection()
+    {
+        if (EventSystem.current != null &&
+            EventSystem.current.currentSelectedGameObject != null)
+        {
+            EventSystem.current.SetSelectedGameObject(null);
+        }
+    }
+}
+
+// 実験の名前を持つコンポーネント(HomeEnvSetup / HomeEnvLoader)の共通インターフェース。
+// 同じGameObject上の他コンポーネントが実験の名前を参照するのに使う。
+public interface IHomeExperimentNameProvider
+{
+    string ExperimentName { get; }
+}
+
+// インスペクターで実験名/実験対象者名を既存フォルダから選べるようにする属性。
+// 描画は Editor/HomeExperimentFolderDrawer.cs。
+public class HomeExperimentFolderAttribute : PropertyAttribute
+{
+    public enum Kind
+    {
+        Experiment,
+        Subject
+    }
+
+    public readonly Kind kind;
+
+    public HomeExperimentFolderAttribute(Kind kind)
+    {
+        this.kind = kind;
+    }
+}
+
+// データ(Env/ と Skeleton/)の保存先(読み込み元)のルートフォルダを持つコンポーネントの共通インターフェース。
+// 空なら既定の Assets/Data/HomeExperiment。同じGameObjectの HomeEnvLoader と、
+// インスペクターのフォルダ選択(実験の名前・実験対象者・Skeleton Variant)が使う。
+public interface IHomeDataRootProvider
+{
+    string DataRootDirectory { get; }
+}
+
+// インスペクターでデータのルートフォルダを「テキスト入力 + フォルダを選ぶボタン + 既定に戻すボタン」で指定できるようにする属性。
+// 空なら既定の Assets/Data/HomeExperiment。描画は Editor/HomeDataRootFolderDrawer.cs。
+public class HomeDataRootFolderAttribute : PropertyAttribute
+{
+}
+
+// インスペクターで、平滑化した骨格(Filtered/grouped_<Mode>_<名前>.json)の <名前> を既存ファイルから選べるようにする属性。
+// 同じコンポーネントの subjectName / skeletonSource / filteredMode から探す場所を決める。
+// 描画は Editor/HomeSkeletonVariantDrawer.cs。
+public class HomeSkeletonVariantAttribute : PropertyAttribute
+{
+}

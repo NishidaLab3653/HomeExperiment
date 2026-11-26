@@ -1,0 +1,379 @@
+using System.Collections.Generic;
+using System.IO;
+using System.Text;
+using UnityEngine;
+
+// シーン1(1HeadDirRecording)用。Spaceキーで全キネクトの骨格データ記録を同時に開始/終了し、
+// Assets/Data/HomeExperiment/<実験の名前>/Skeleton/<実験対象者>/<ID>_skeleton.json に保存する(Record Skeleton オフのときは保存しない)。
+// Data Root Directory を指定すると、Assets/Data/HomeExperiment の代わりにそのフォルダ(例: D:\HomeExperiment)に保存する。
+// Record Raw Mkv にチェックを入れると、同じタイミングで全キネクトの生データ(カラー・深度・赤外線の MKV)も
+// Raw~/ に記録する(画像での推定 Tools/GazePipeline 用)。
+// Record Skeleton をオフ・Record Raw Mkv をオンにすると「映像のみ」記録になる(Body Tracking をしないので複数台運用時の負荷が下がる)。
+// 実験の名前は同じGameObjectの HomeEnvLoader から取得する。
+// キネクトの表示/非表示を HomeEnvLoader(DefaultExecutionOrder -100)が見る前に反映するため、それより先に Awake を実行する。
+[DefaultExecutionOrder(-200)]
+[RequireComponent(typeof(HomeEnvLoader))]
+public class HomeSkeletonRecordingController : MonoBehaviour, IHomeDataRootProvider
+{
+    [Header("Data Location")]
+    [Tooltip("骨格データ・生データの保存先のルートフォルダ。<ここ>/<実験の名前>/Skeleton/<実験対象者>/ に保存する。\n" +
+             "空なら既定の Assets/Data/HomeExperiment。例: D:\\HomeExperiment\n" +
+             "Env(キネクト位置・部屋オブジェクト)もここの <実験の名前>/Env/ から読む。シーン0と同じフォルダを指定する。")]
+    [HomeDataRootFolder]
+    [UnityEngine.Serialization.FormerlySerializedAs("saveRootDirectory")]
+    [SerializeField] private string dataRootDirectory = "";
+
+    [Header("Subject")]
+    [HomeExperimentFolder(HomeExperimentFolderAttribute.Kind.Subject)]
+    [SerializeField] private string subjectName = "";
+
+    [Header("Recorders")]
+    [Tooltip("空の場合はシーン内の表示中の HomeSkeletonRecorder を自動で集める。")]
+    [SerializeField] private HomeSkeletonRecorder[] recorders;
+
+    [Header("Kinects")]
+    [Tooltip("キネクトごとの設定。マシンごとに設定する。表を変えるとシーンのキネクトにすぐ反映される。\n" +
+             "Use: オフでそのキネクトのオブジェクトを非表示にする(このマシンにつないでいないキネクト)\n" +
+             "Device Index: このPCにつながっている台数の中での通し番号 0〜\n" +
+             "Sync Mode: 同期ケーブルでつなぐときは、同期信号を出す1台を Master、それ以外を Subordinate にする(Standalone だと Master を待たずに撮り始める)\n" +
+             "表に無いキネクトは触らない。")]
+    [SerializeField] private HomeKinectDeviceIndex[] kinectDeviceIndices = HomeKinectDeviceIndex.CreateDefault();
+
+    [Header("Raw Recording")]
+    [Tooltip("骨格と一緒に、全キネクトのカラー(MJPG)・深度・赤外線をそのまま MKV に記録する(Skeleton/<実験対象者>/Raw~/)。\n" +
+             "あとから Tools/GazePipeline で画像から骨格・頭の向き・視線を推定するため。プレイ開始前に設定する。")]
+    [SerializeField] private bool recordRawMkv = false;
+    [Tooltip("Record Raw Mkv のときのカラー解像度。骨格推定は深度だけを使うので、上げても Kinect の骨格の精度は変わらない(離れた人の顔が大きく写る)。")]
+    [SerializeField] private Microsoft.Azure.Kinect.Sensor.ColorResolution rawColorResolution = Microsoft.Azure.Kinect.Sensor.ColorResolution.R1080p;
+    [Tooltip("骨格推定(Body Tracking)を行い、skeleton.json を保存する。\n" +
+             "オフにして Record Raw Mkv だけオンにすると「映像のみ」記録になる。Body Tracking をしない分、キネクトを複数台同時に動かしたときの負荷が下がり安定しやすい。")]
+    [SerializeField] private bool recordSkeleton = true;
+    [Tooltip("全キネクトの撮影フレームレート(骨格・MKV 共通)。Azure Kinect は 5 / 15 / 30 fps のみ。\n" +
+             "30fps でフレームが抜ける(PCの負荷が足りない)ときは 15fps にすると、間隔が一定で安定しやすい。\n" +
+             "カラー 3072p は 30fps に対応していないので、そのときは自動で 15fps にする。プレイ開始前に設定する。")]
+    [SerializeField] private Microsoft.Azure.Kinect.Sensor.FPS cameraFps = Microsoft.Azure.Kinect.Sensor.FPS.FPS30;
+
+    [Header("Input")]
+    [SerializeField] private KeyCode toggleKey = KeyCode.Space;
+
+    [Header("Safety")]
+    [Tooltip("Env(部屋オブジェクト・キネクト位置)を読み込めていない場合は記録を始めない。")]
+    [SerializeField] private bool requireEnvLoaded = true;
+
+    [Header("Status")]
+    [SerializeField] private bool showStatus = true;
+
+    private HomeEnvLoader env;
+
+    public string DataRootDirectory => dataRootDirectory;
+    private readonly List<HomeSkeletonRecorder> activeRecorders = new List<HomeSkeletonRecorder>();
+    private bool isRecording;
+    private double recordingStartClock;
+    private string recordingStartedAt;
+    private string lastMessage = "";
+    private GUIStyle statusStyle;
+
+    // 他マシンと記録を同期するスクリプト(HomeMultiMachineRecordingSync)から、
+    // Spaceキーで実際に開始/終了できたかを確認するために使う。
+    public bool IsRecording => isRecording;
+
+    // false にすると toggleKey で開始/終了しない(HomeMultiMachineRecordingSync の Follower は Master の信号だけで動く)
+    public bool KeyInputEnabled { get; set; } = true;
+
+    private void Awake()
+    {
+        env = GetComponent<HomeEnvLoader>();
+        HomeGpuCheck.LogOnce(nameof(HomeSkeletonRecordingController));
+
+        // 各キネクトはカメラを Start で開くので、それより前(Awake)に表示/非表示・deviceIndex・syncMode を反映する。
+        // HomeEnvLoader(Awake で表示中のキネクトの位置姿勢を読む)より先に実行されるよう DefaultExecutionOrder を下げてある。
+        HomeKinectDeviceIndex.ApplyToScene(kinectDeviceIndices);
+        HomeKinectDeviceIndex.WarnDuplicates(nameof(HomeSkeletonRecordingController));
+
+        if (recorders == null || recorders.Length == 0)
+            recorders = FindObjectsOfType<HomeSkeletonRecorder>();
+
+        foreach (HomeSkeletonRecorder recorder in recorders)
+        {
+            if (recorder == null)
+                continue;
+
+            recorder.recordRawMkv = recordRawMkv;
+            recorder.rawColorResolution = rawColorResolution;
+            recorder.recordSkeleton = recordSkeleton;
+            recorder.cameraFps = cameraFps;
+        }
+    }
+
+#if UNITY_EDITOR
+    [System.NonSerialized] private bool kinectTableLoaded;
+
+    private void OnValidate()
+    {
+        HomeKinectDeviceIndex.ApplyToSceneInEditor(kinectDeviceIndices, this, ref kinectTableLoaded);
+    }
+#endif
+
+    private void Update()
+    {
+        if (!KeyInputEnabled || !Input.GetKeyDown(toggleKey))
+            return;
+
+        if (isRecording)
+            StopAndSave();
+        else
+            StartRecording();
+    }
+
+    private void LateUpdate()
+    {
+        HomeExperimentPaths.ClearUISelection();
+    }
+
+    private void OnApplicationQuit()
+    {
+        // 記録中にプレイを止めた場合もデータを失わないように保存する
+        if (isRecording)
+            StopAndSave();
+    }
+
+    public void StartRecording()
+    {
+        if (isRecording)
+            return;
+
+        if (!HomeExperimentPaths.IsValidFolderName(env.ExperimentName, out string error))
+        {
+            SetMessage($"実験の名前を正しく入力してください。{error}", true);
+            return;
+        }
+
+        if (!HomeExperimentPaths.IsValidFolderName(subjectName, out error))
+        {
+            SetMessage($"実験対象者を正しく入力してください。{error}", true);
+            return;
+        }
+
+        if (!HomeExperimentPaths.IsValidRootDirectory(dataRootDirectory, out error))
+        {
+            SetMessage($"保存先を正しく指定してください。{error}", true);
+            return;
+        }
+
+        if (requireEnvLoaded && !env.IsLoaded)
+        {
+            SetMessage("Envを読み込めていないため記録を開始しません。コンソールのエラーを確認してください。", true);
+            return;
+        }
+
+        if (!recordSkeleton && !recordRawMkv)
+        {
+            SetMessage("Record Skeleton も Record Raw Mkv も無効です。どちらか一方は有効にしてください。", true);
+            return;
+        }
+
+        activeRecorders.Clear();
+
+        foreach (HomeSkeletonRecorder recorder in recorders)
+        {
+            if (recorder == null || !recorder.isActiveAndEnabled)
+                continue;
+
+            if (!recorder.IsReady)
+            {
+                Debug.LogWarning($"[HomeSkeletonRecordingController] Kinect{recorder.KinectId} は準備できていないため記録しません。");
+                continue;
+            }
+
+            activeRecorders.Add(recorder);
+        }
+
+        if (activeRecorders.Count == 0)
+        {
+            SetMessage("記録できるキネクトがありません。", true);
+            return;
+        }
+
+        recordingStartClock = HomeSkeletonRecorder.ClockSeconds;
+        recordingStartedAt = System.DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff");
+
+        string rawDir = HomeExperimentPaths.GetRawDirectory(dataRootDirectory, env.ExperimentName, subjectName);
+        bool anyRaw = activeRecorders.Exists(r => r.recordRawMkv);
+
+        if (anyRaw)
+            BackupPreviousRaw(rawDir);
+
+        foreach (HomeSkeletonRecorder recorder in activeRecorders)
+        {
+            HomeRawIndex rawInfo = new HomeRawIndex
+            {
+                experimentName = env.ExperimentName,
+                subjectName = subjectName,
+                recordingStartedAt = recordingStartedAt
+            };
+
+            recorder.BeginRecording(recordingStartClock, anyRaw ? rawDir : null, rawInfo);
+        }
+
+        isRecording = true;
+        SetMessage($"記録開始: {env.ExperimentName} / {subjectName} (キネクト {activeRecorders.Count} 台)", false);
+    }
+
+    public void StopAndSave()
+    {
+        if (!isRecording)
+            return;
+
+        isRecording = false;
+
+        string subjectDir = HomeExperimentPaths.GetSubjectDirectory(dataRootDirectory, env.ExperimentName, subjectName);
+        Directory.CreateDirectory(subjectDir);
+
+        string backupSuffix = System.DateTime.Now.ToString("yyyyMMdd_HHmmss");
+        StringBuilder summary = new StringBuilder();
+
+        foreach (HomeSkeletonRecorder recorder in activeRecorders)
+        {
+            // EndRecording は MKV の後処理(書き込みスレッドの終了待ち・ファイルの移動)も行うので、
+            // 1台の後処理で例外が起きても他のキネクトの後処理が飛ばないよう、必ず全台分呼ぶ。
+            List<HomeSkeletonFrame> frames = recorder.EndRecording();
+
+            if (!recordSkeleton)
+            {
+                summary.Append($" {recorder.KinectId}:video-only");
+                continue;
+            }
+
+            string path = HomeExperimentPaths.GetSkeletonPath(dataRootDirectory, env.ExperimentName, subjectName, recorder.KinectId);
+
+            // 同じ実験対象者で撮り直した場合、前のデータは上書きせず名前を変えて残す
+            if (File.Exists(path))
+            {
+                string backupPath = Path.Combine(subjectDir, $"{recorder.KinectId}_skeleton_old_{backupSuffix}.json");
+
+                try
+                {
+                    File.Move(path, backupPath);
+                    Debug.LogWarning($"[HomeSkeletonRecordingController] 既存のファイルを退避しました: {backupPath}");
+                }
+                catch (System.Exception e)
+                {
+                    Debug.LogError($"[HomeSkeletonRecordingController] 既存のファイルを退避できませんでした(上書きされます): {path}\n{e}");
+                }
+            }
+
+            HomeSkeletonFrameList data = new HomeSkeletonFrameList
+            {
+                experimentName = env.ExperimentName,
+                subjectName = subjectName,
+                kinectId = recorder.KinectId,
+                deviceIndex = recorder.deviceIndex,
+                recordingStartedAt = recordingStartedAt,
+                frames = frames
+            };
+
+            try
+            {
+                File.WriteAllText(path, JsonUtility.ToJson(data));
+                summary.Append($" {recorder.KinectId}:{frames.Count}frames");
+                Debug.Log($"[HomeSkeletonRecordingController] 保存しました ({frames.Count} frames): {path}");
+            }
+            catch (System.Exception e)
+            {
+                Debug.LogError($"[HomeSkeletonRecordingController] 保存に失敗しました: {path}\n{e}");
+            }
+        }
+
+        double duration = HomeSkeletonRecorder.ClockSeconds - recordingStartClock;
+        activeRecorders.Clear();
+        HomeExperimentPaths.RefreshAssetDatabase();
+
+        SetMessage($"記録終了 ({duration:F1}s):{summary} → {subjectDir}", false);
+    }
+
+    // 同じ実験対象者で撮り直した場合、前の生データは上書きせず Raw~/old_<日時>/ に移して残す
+    private static void BackupPreviousRaw(string rawDir)
+    {
+        if (!Directory.Exists(rawDir))
+            return;
+
+        string[] files = Directory.GetFiles(rawDir);
+
+        if (files.Length == 0)
+            return;
+
+        string backupDir = Path.Combine(rawDir, $"old_{System.DateTime.Now:yyyyMMdd_HHmmss}");
+        Directory.CreateDirectory(backupDir);
+
+        foreach (string file in files)
+        {
+            try
+            {
+                File.Move(file, Path.Combine(backupDir, Path.GetFileName(file)));
+            }
+            catch (System.Exception e)
+            {
+                // 1ファイルの退避に失敗しても記録の開始自体は止めない(ここで例外が飛ぶと StartRecording ごと失敗する)
+                Debug.LogError($"[HomeSkeletonRecordingController] 既存の生データを退避できませんでした: {file}\n{e}");
+            }
+        }
+
+        Debug.LogWarning($"[HomeSkeletonRecordingController] 既存の生データを退避しました: {backupDir}");
+    }
+
+    private void SetMessage(string message, bool isError)
+    {
+        lastMessage = message;
+
+        if (isError)
+            Debug.LogError($"[HomeSkeletonRecordingController] {message}");
+        else
+            Debug.Log($"[HomeSkeletonRecordingController] {message}");
+    }
+
+    private void OnGUI()
+    {
+        if (!showStatus)
+            return;
+
+        if (statusStyle == null)
+            statusStyle = new GUIStyle(GUI.skin.box) { alignment = TextAnchor.UpperLeft, fontSize = 16, wordWrap = true };
+
+        StringBuilder text = new StringBuilder();
+        text.AppendLine($"実験: {env.ExperimentName}   実験対象者: {subjectName}");
+
+        if (isRecording)
+            text.AppendLine($"● 記録中 {HomeSkeletonRecorder.ClockSeconds - recordingStartClock:F1}s   [{toggleKey}]で終了");
+        else
+            text.AppendLine($"待機中   [{toggleKey}]で記録開始");
+
+        foreach (HomeSkeletonRecorder recorder in recorders)
+        {
+            if (recorder == null || !recorder.isActiveAndEnabled)
+                continue;
+
+            string state = !recorder.IsReady ? "未接続" :
+                isRecording && recordSkeleton ? $"{recorder.RecordedFrameCount} frames" : "準備完了";
+
+            if (recorder.SerialMismatch)
+                state += " / シリアル番号がシーン0と違う";
+
+            if (recorder.recordRawMkv && isRecording)
+                state += recorder.IsRecordingRaw ? $" / MKV {recorder.RawFrameCount} frames" : " / MKV 停止(エラー)";
+            else if (recorder.recordRawMkv)
+                state += " / MKV 記録あり";
+
+            string detected = recordSkeleton ? $" / 検出 {recorder.LatestBodyCount} 人" : "";
+            text.AppendLine($"Kinect{recorder.KinectId}: {state}{detected}");
+        }
+
+        if (!string.IsNullOrEmpty(lastMessage))
+            text.Append(lastMessage);
+
+        GUIContent content = new GUIContent(text.ToString());
+        const float width = 560f;
+
+        GUI.color = isRecording ? new Color(1f, 0.6f, 0.6f) : Color.white;
+        GUI.Box(new Rect(10, 10, width, statusStyle.CalcHeight(content, width)), content, statusStyle);
+    }
+}
