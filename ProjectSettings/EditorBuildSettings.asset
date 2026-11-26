@@ -6,27 +6,27 @@ EditorBuildSettings:
   serializedVersion: 2
   m_Scenes:
   - enabled: 1
-    path: Assets/0Scenes/4HomeExperiment/0HomeSetup.unity
+    path: Assets/0Scenes/1Measurement/0HomeSetup.unity
     guid: f59ded771b0372e498c1b03eb245aac4
   - enabled: 1
-    path: Assets/0Scenes/4HomeExperiment/1HeadDirRecording.unity
+    path: Assets/0Scenes/1Measurement/1HeadDirRecording.unity
     guid: 210868803c6cce04fa0592bdf94e875f
   - enabled: 1
-    path: Assets/0Scenes/4HomeExperiment/1HeadDirRecordingMulti.unity
+    path: Assets/0Scenes/1Measurement/1HeadDirRecordingMulti.unity
     guid: 22f9ca7dd3cc20f4a83d644c0ae9df6d
   - enabled: 1
-    path: Assets/0Scenes/4HomeExperiment/2HeadDirViewer.unity
+    path: Assets/0Scenes/2Analysis/2HeadDirViewer.unity
     guid: 8650765ee9cf44341a22db10b0bf8f6f
   - enabled: 1
-    path: Assets/0Scenes/4HomeExperiment/3HeadDirFilter.unity
+    path: Assets/0Scenes/2Analysis/3HeadDirFilter.unity
     guid: 04a7e253fb404354bf7271911bd1ed04
   - enabled: 1
-    path: Assets/0Scenes/4HomeExperiment/4GazeAnalyze.unity
+    path: Assets/0Scenes/2Analysis/4GazeAnalyze.unity
     guid: 7703be65afc5af949b1af09fcc2e98b3
   - enabled: 1
-    path: Assets/0Scenes/4HomeExperiment/5GazeExport.unity
+    path: Assets/0Scenes/2Analysis/5GazeExport.unity
     guid: 3cbd801379ba486ca8dd37905669c587
   - enabled: 1
-    path: Assets/0Scenes/4HomeExperiment/6ArrivalCheck.unity
+    path: Assets/0Scenes/2Analysis/6ArrivalCheck.unity
     guid: f06a90e882844afea78cee8bb9d5fe68
   m_configObjects: {}
