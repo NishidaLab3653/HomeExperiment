@@ -58,6 +58,9 @@ public class HomeTestRecording : MonoBehaviour
 
     private HomeEnvSetup envSetup;
     private State state = State.Idle;
+
+    // 試し撮り中か(シーンマネージャーの「メニューに戻る」を止めるため)
+    public bool IsRecording => state != State.Idle;
     private readonly List<Unit> units = new List<Unit>();
     private string rootDir;
     private string testDir;

@@ -1,47 +1,47 @@
 using System;
 using System.Collections.Concurrent;
-using System.Collections.Generic;
 using UnityEditor;
 using UnityEngine;
 
 // 同期をエディタで動かし続ける部分。このPCの役割(HomeSyncSettings.role)に応じて、
 // 制御PCなら HomeSyncServer、録画PCなら HomeSyncClient を起動する(「このPCだけ」「使わない」ではネットワークを使わない)。
-// プレイ開始やスクリプトの再コンパイルで止まっても、自動で起動し直す。画面は HomeControlPanel。
+// プレイ開始やスクリプトの再コンパイルで止まっても、自動で起動し直す。
+// 設定はシーンマネージャー(Assets/0Scenes/HomeSceneManager.unity)の画面で変える。状態は HomeSyncStatus を通して画面に渡す。
 [InitializeOnLoad]
 public static class HomeSyncService
 {
+    private const string ManagerScene = "Assets/0Scenes/HomeSceneManager.unity";
+
     private static HomeSyncServer server;
     private static HomeSyncClient client;
     private static long publishedRevision = -1;
     private static string publishedExperiment;
     private static string publishedSubject;
     private static string runningConfig;
-
-    public static HomeSyncServer Server => server;
-    public static HomeSyncClient Client => client;
-    public static string StartError { get; private set; }
-    public static readonly List<string> RecentLogs = new List<string>();
+    private static double nextSettingsCheck;
 
     static HomeSyncService()
     {
         AssemblyReloadEvents.beforeAssemblyReload += Stop;
         EditorApplication.quitting += Stop;
         EditorApplication.update += Update;
-        EditorApplication.delayCall += () =>
-        {
-            Restart();
-
-            // まだ一度も設定していないPCでは、最初にコントロールパネルを開く
-            if (!Application.isBatchMode && !System.IO.File.Exists(HomeSyncPaths.SettingsPath))
-                HomeControlPanel.Open();
-        };
+        EditorApplication.delayCall += Restart;
     }
 
-    // ネットワークに関係する設定(役割・名前・データの場所・アドレス・ポート)が変わったときだけ起動し直す
-    public static void RestartIfNeeded()
+    [MenuItem("HomeExperiment/シーンマネージャーで始める %#h", priority = 0)]
+    public static void PlayFromManager()
     {
-        if (NetworkConfig(HomeSyncSettings.Current) != runningConfig)
-            Restart();
+        if (EditorApplication.isPlaying)
+        {
+            EditorApplication.isPlaying = false;
+            return;
+        }
+
+        if (!UnityEditor.SceneManagement.EditorSceneManager.SaveCurrentModifiedScenesIfUserWantsTo())
+            return;
+
+        UnityEditor.SceneManagement.EditorSceneManager.OpenScene(ManagerScene);
+        EditorApplication.isPlaying = true;
     }
 
     private static string NetworkConfig(HomeSyncSettings s) =>
@@ -50,7 +50,7 @@ public static class HomeSyncService
     public static void Restart()
     {
         Stop();
-        StartError = null;
+        HomeSyncStatus.Error = "";
 
         HomeSyncSettings settings = HomeSyncSettings.Current;
         _ = HomeSyncPaths.ProjectRoot;
@@ -61,7 +61,7 @@ public static class HomeSyncService
 
         if (!HomeExperimentPaths.IsValidRootDirectory(settings.dataRootDirectory, out string error))
         {
-            StartError = $"データの場所が正しくありません。{error}";
+            HomeSyncStatus.Error = $"データの場所が正しくありません。{error}";
             return;
         }
 
@@ -75,7 +75,7 @@ public static class HomeSyncService
 
             if (!server.Start())
             {
-                StartError = server.Error;
+                HomeSyncStatus.Error = server.Error;
                 server = null;
             }
         }
@@ -92,10 +92,23 @@ public static class HomeSyncService
         client?.Stop();
         server = null;
         client = null;
+        HomeSyncStatus.Running = false;
+        HomeSyncStatus.Connected = false;
     }
 
     private static void Update()
     {
+        // 画面で役割・データの場所などが変わったら起動し直す
+        if (EditorApplication.timeSinceStartup >= nextSettingsCheck)
+        {
+            nextSettingsCheck = EditorApplication.timeSinceStartup + 1.0;
+
+            if (NetworkConfig(HomeSyncSettings.Current) != runningConfig)
+                Restart();
+        }
+
+        HomeSyncStatus.Running = server != null || client != null;
+
         if (server != null)
         {
             // 制御PCでセッションが変わったら、配る内容を差し替える
@@ -109,11 +122,26 @@ public static class HomeSyncService
                 publishedSubject = session.subjectName;
             }
 
+            HomeSyncStatus.Clients = server.GetClients().ConvertAll(c => new HomeSyncStatus.ClientInfo
+            {
+                name = c.name, address = c.address, status = c.status, lastSeen = c.lastSeen
+            });
             Drain(server.Logs);
         }
 
         if (client != null)
         {
+            HomeSyncStatus.Connected = client.Connected;
+            HomeSyncStatus.Status = client.Status;
+            HomeSyncStatus.ServerDescription = client.ServerDescription;
+            HomeSyncStatus.LastSyncedAt = client.LastSyncedAt;
+
+            if (HomeSyncStatus.SyncNowRequested)
+            {
+                HomeSyncStatus.SyncNowRequested = false;
+                client.SyncNow();
+            }
+
             Drain(client.Logs);
 
             if (client.ConsumeRefreshRequest())
@@ -121,28 +149,12 @@ public static class HomeSyncService
         }
     }
 
-    public static void AddLog(string message)
-    {
-        Debug.Log($"[HomeExperiment] {message}");
-        RecentLogs.Add($"{DateTime.Now:HH:mm:ss} {message}");
-        HomeControlPanel.RepaintOpenWindows();
-    }
-
     private static void Drain(ConcurrentQueue<string> logs)
     {
-        bool any = false;
-
         while (logs.TryDequeue(out string message))
         {
             Debug.Log($"[HomeSync] {message}");
-            RecentLogs.Add($"{DateTime.Now:HH:mm:ss} {message}");
-            any = true;
+            HomeSyncStatus.AddLog(message);
         }
-
-        if (RecentLogs.Count > 200)
-            RecentLogs.RemoveRange(0, RecentLogs.Count - 200);
-
-        if (any)
-            HomeControlPanel.RepaintOpenWindows();
     }
 }
